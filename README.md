@@ -18,7 +18,7 @@ Game → DirectX → DXVK → Vulkan API → VkWebGPU ICD → WebGPU → Browser
 - ✅ Vulkan ICD entry points (vk_icd.h interface)
 - ✅ Error handling and result mapping
 - ✅ Thread-safe handle allocation
-- ✅ Format conversion (40+ formats)
+- ✅ Format conversion (50+ formats, including X8_D24, A8B8G8R8 packed variants)
 
 ### Resource Management ✅
 - ✅ Instance → GPUAdapter mapping
@@ -47,6 +47,10 @@ Game → DirectX → DXVK → Vulkan API → VkWebGPU ICD → WebGPU → Browser
 - ✅ Compute commands (dispatch)
 - ✅ Transfer commands (copy buffer, copy buffer to image)
 - ✅ Synchronization (fences, semaphores, barriers)
+- ✅ **Correct render pass load/store ops** (LOAD/CLEAR/DONT_CARE per attachment)
+- ✅ **Dynamic descriptor set offset distribution** (multi-set, multi-dynamic-binding)
+- ✅ **COMBINED_IMAGE_SAMPLER** SPIR-V pre-processing (naga compatibility)
+- ✅ **HOST_COHERENT memory auto-flush** at vkQueueSubmit
 
 ### Build Status ✅
 - ✅ **Compiles with 0 errors, 0 warnings**
@@ -85,15 +89,40 @@ Game → DirectX → DXVK → Vulkan API → VkWebGPU ICD → WebGPU → Browser
 
 ## Recent Achievements
 
-### Command Buffer Replay System ✅
+### GPU Memory Upload + Render Pass Correctness ✅
 **Latest Implementation (2026-02-18)**
 
-Successfully implemented a production-ready deferred command buffer recording and replay system that bridges the fundamental incompatibility between Vulkan's deferred command model and WebGPU's scoped pass lifetimes.
+Complete end-to-end GPU data upload path and correct render pass load/store semantics — both required for any pixels to appear on screen.
+
+**GPU Memory Upload (all three paths now work):**
+- `map → write → vkFlushMappedMemoryRanges` → `write_buffer` (explicit flush)
+- `map → write → vkUnmapMemory` → `write_buffer` (on unmap)
+- `map → write → vkQueueSubmit` → `write_buffer` (HOST_COHERENT auto-flush)
+
+All wgpu Buffers now unconditionally include `COPY_DST | COPY_SRC` so `write_buffer` never silently fails on staging-only buffers.
+
+**Render Pass Load/Store Ops:**
+- BeginRenderPass reads actual `load_op / store_op / stencil_load_op / stencil_store_op` from `VkAttachmentDescription` instead of hard-coding `LoadOp::Clear`
+- Depth-only formats omit `stencil_ops: None`; stencil-only formats omit `depth_ops: None`
+- `LOAD_OP_LOAD → LoadOp::Load`, `LOAD_OP_CLEAR → LoadOp::Clear(value)`, `DONT_CARE → LoadOp::Load`
+- `STORE_OP_STORE → StoreOp::Store`, `DONT_CARE / NONE → StoreOp::Discard`
+
+**Dynamic Descriptor Set Offsets:**
+- Replaced single-set FIXME with correct per-set offset slicing
+- Counts `UNIFORM_BUFFER_DYNAMIC` + `STORAGE_BUFFER_DYNAMIC` bindings per layout to slice exactly the right number of offsets from the flat array
+
+**COMBINED_IMAGE_SAMPLER (Zink/GLSL shaders):**
+- SPIR-V pre-processor splits CIS variables into separate image + sampler vars with compact binding numbers (below wgpu's 1000-binding limit)
+- Descriptor layout uses the same compact formula — both sides agree on synthetic sampler binding numbers
+
+### Command Buffer Replay System ✅
+**Implementation (2026-02-18)**
+
+Production-ready deferred command buffer recording and replay system that bridges the fundamental incompatibility between Vulkan's deferred command model and WebGPU's scoped pass lifetimes.
 
 **Key Features:**
 - **12/12 Commands Fully Implemented**: BeginRenderPass, EndRenderPass, BindPipeline (graphics + compute), BindVertexBuffers, BindIndexBuffer, BindDescriptorSets, Draw, DrawIndexed, Dispatch, CopyBuffer, CopyBufferToImage, PipelineBarrier
 - **Resource Lifetime Safety**: Proper Arc cloning, RwLock management, safe lifetime extension via transmute
-- **Production-Ready**: 92/100 score with comprehensive error handling
 - **Critical Fixes**: Compute pipeline binding, format-aware bytes_per_row, dynamic offset handling
 
 **Technical Approach:**
@@ -128,9 +157,9 @@ replay_commands(cmd_buffer, backend) -> WebGPU CommandBuffer
 - Buffer/texture uploads and downloads
 
 **Known Limitations (Acceptable for v1.0):**
-- Dynamic offsets for multiple descriptor sets (TODO, 95% of cases work)
 - WASM implementation (stub returns FeatureNotSupported)
 - No secondary command buffers (may not be needed for DXVK)
+- Pipeline cache unimplemented (no-op; no correctness impact)
 
 ### Phase 3: Game Compatibility
 
@@ -155,7 +184,6 @@ replay_commands(cmd_buffer, backend) -> WebGPU CommandBuffer
 ### Future Enhancements
 
 **Not Blocking:**
-- Multi-set dynamic offset distribution (requires pipeline layout tracking)
 - WASM target implementation (web-sys API integration)
 - Secondary command buffers (if DXVK requires)
 - Advanced validation layers
