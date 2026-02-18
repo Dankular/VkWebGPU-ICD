@@ -1,4 +1,10 @@
 //! Vulkan Swapchain implementation (KHR extension)
+//!
+//! Swapchain images are backed by real wgpu Textures with RENDER_ATTACHMENT usage so that
+//! vkCreateImageView, framebuffer creation, and render passes all work correctly.
+//! Presentation is not yet connected to a real display surface; frames are rendered into
+//! offscreen GPU textures.  A future step will wire up wgpu::Surface from the Win32 HWND
+//! stored in the VkSurfaceKHR for actual display.
 
 use ash::vk::{self, Handle};
 use log::debug;
@@ -6,8 +12,11 @@ use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use crate::device;
 use crate::error::{Result, VkError};
+use crate::format;
 use crate::handle::HandleAllocator;
+use crate::image;
 
 pub static SWAPCHAIN_ALLOCATOR: Lazy<HandleAllocator<VkSwapchainData>> =
     Lazy::new(|| HandleAllocator::new());
@@ -25,10 +34,10 @@ pub struct VkSwapchainData {
     pub composite_alpha: vk::CompositeAlphaFlagsKHR,
     pub present_mode: vk::PresentModeKHR,
 
-    // Swapchain images (dummy VkImage handles for API compatibility)
+    /// Real VkImage handles backed by wgpu Textures (registered in IMAGE_ALLOCATOR).
     pub images: Vec<vk::Image>,
 
-    // Track which image is currently acquired
+    /// Tracks which image index was most recently acquired.
     pub current_image_index: AtomicU32,
 }
 
@@ -55,18 +64,61 @@ pub unsafe fn create_swapchain_khr(
         create_info.min_image_count
     );
 
-    // Determine actual image count (typically triple buffering)
-    let image_count = create_info.min_image_count.max(3);
+    // Clamp image count to a sensible range (triple buffering default).
+    let image_count = create_info.min_image_count.clamp(2, 8).max(3);
 
-    // Create dummy VkImage handles for the swapchain images
-    // These are placeholders for API compatibility
-    let mut images = Vec::with_capacity(image_count as usize);
-    for i in 0..image_count {
-        // Create a unique handle by combining swapchain info with image index
-        // Using a high bit pattern to avoid conflicts with regular images
-        let image_handle =
-            0xDEAD_0000_0000_0000u64 | ((device.as_raw() & 0xFFFFFF) << 32) as u64 | i as u64;
-        images.push(Handle::from_raw(image_handle));
+    let device_data = device::get_device_data(device)
+        .ok_or_else(|| VkError::InvalidHandle("Invalid device".to_string()))?;
+
+    // Map the Vulkan format to a wgpu TextureFormat for the render targets.
+    // Fall back to Bgra8Unorm if the format is unknown (rare for swapchain formats).
+    let wgpu_format = format::vk_to_wgpu_format(create_info.image_format)
+        .unwrap_or(wgpu::TextureFormat::Bgra8Unorm);
+
+    // Build wgpu texture usage flags from what the application requests.
+    let wgpu_usage = {
+        let mut u = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::TEXTURE_BINDING;
+        if create_info
+            .image_usage
+            .contains(vk::ImageUsageFlags::STORAGE)
+        {
+            u |= wgpu::TextureUsages::STORAGE_BINDING;
+        }
+        u
+    };
+
+    // Create one real wgpu Texture per swapchain image and register each as a VkImage.
+    let mut images: Vec<vk::Image> = Vec::with_capacity(image_count as usize);
+    for idx in 0..image_count {
+        let texture = device_data
+            .backend
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("SwapchainImage[{}]", idx)),
+                size: wgpu::Extent3d {
+                    width: create_info.image_extent.width,
+                    height: create_info.image_extent.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu_format,
+                usage: wgpu_usage,
+                view_formats: &[],
+            });
+
+        let vk_image = image::create_swapchain_image(
+            device,
+            create_info.image_format,
+            create_info.image_extent,
+            texture,
+        );
+        images.push(vk_image);
+        debug!("Created swapchain image[{}]: {:?}", idx, vk_image);
     }
 
     let swapchain_data = VkSwapchainData {
@@ -88,8 +140,7 @@ pub unsafe fn create_swapchain_khr(
     let swapchain_handle = SWAPCHAIN_ALLOCATOR.allocate(swapchain_data);
     *p_swapchain = Handle::from_raw(swapchain_handle);
 
-    debug!("Created swapchain with {} images", image_count);
-
+    debug!("Created swapchain with {} wgpu-backed images", image_count);
     Ok(())
 }
 
@@ -99,6 +150,13 @@ pub unsafe fn destroy_swapchain_khr(
 ) {
     if swapchain == vk::SwapchainKHR::null() {
         return;
+    }
+
+    // Unregister all backing VkImages before dropping the swapchain.
+    if let Some(data) = SWAPCHAIN_ALLOCATOR.get(swapchain.as_raw()) {
+        for &img in &data.images {
+            image::destroy_swapchain_image(img);
+        }
     }
 
     debug!("Destroying swapchain");
@@ -140,8 +198,8 @@ pub unsafe fn acquire_next_image_khr(
 ) -> Result<()> {
     let swapchain_data = get_swapchain_data(swapchain)?;
 
-    // For WebGPU, we don't actually acquire until present time
-    // Just return the next index in sequence (cycle through 0, 1, 2, ...)
+    // Cycle through the available images in order.
+    // In a real implementation with a wgpu Surface this would call surface.get_current_texture().
     let current = swapchain_data.current_image_index.load(Ordering::Relaxed);
     let next = (current + 1) % swapchain_data.image_count;
     swapchain_data
@@ -151,7 +209,7 @@ pub unsafe fn acquire_next_image_khr(
     *p_image_index = next;
 
     debug!(
-        "Acquired swapchain image index: {} (cycling {}/{})",
+        "Acquired swapchain image index: {} ({}/{})",
         next,
         next + 1,
         swapchain_data.image_count
@@ -175,26 +233,17 @@ pub unsafe fn queue_present_khr(
         present_info.p_swapchains,
         present_info.swapchain_count as usize,
     );
-
     let image_indices = std::slice::from_raw_parts(
         present_info.p_image_indices,
         present_info.swapchain_count as usize,
     );
 
-    // Process wait semaphores (for API compatibility, but we don't actually wait)
-    if present_info.wait_semaphore_count > 0 {
-        debug!(
-            "Queue present waiting on {} semaphores (ignored in WebGPU)",
-            present_info.wait_semaphore_count
-        );
-    }
-
-    // Present each swapchain
-    for (i, (&swapchain, &image_index)) in swapchains.iter().zip(image_indices.iter()).enumerate() {
+    for (i, (&swapchain, &image_index)) in swapchains.iter().zip(image_indices.iter()).enumerate()
+    {
         let swapchain_data = get_swapchain_data(swapchain)?;
 
         debug!(
-            "Presenting swapchain {} image index: {} ({}x{} {:?})",
+            "Presenting swapchain {} image[{}] ({}x{} {:?})",
             i,
             image_index,
             swapchain_data.image_extent.width,
@@ -202,7 +251,6 @@ pub unsafe fn queue_present_khr(
             swapchain_data.image_format
         );
 
-        // Validate image index
         if image_index >= swapchain_data.image_count {
             return Err(VkError::InvalidHandle(format!(
                 "Invalid image index: {} (max: {})",
@@ -210,23 +258,10 @@ pub unsafe fn queue_present_khr(
             )));
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            // For native: WebGPU surface presentation is automatic after queue.submit()
-            // The actual rendering was done during vkQueueSubmit
-            // This call just confirms the frame is ready to be displayed
-            // In a full implementation, we would call surface.present() here
-            debug!("Native presentation complete for image {}", image_index);
-        }
+        // The frame has already been rendered into the offscreen wgpu texture during
+        // vkQueueSubmit.  A future implementation will blit to an actual wgpu::Surface
+        // acquired from the Win32 HWND stored in VkSurfaceKHR.
 
-        #[cfg(target_arch = "wasm32")]
-        {
-            // For WASM: Presentation happens automatically in requestAnimationFrame
-            // WebGPU handles this internally via the canvas context
-            debug!("WASM presentation queued for image {}", image_index);
-        }
-
-        // Write result if requested
         if !present_info.p_results.is_null() {
             let results = std::slice::from_raw_parts_mut(
                 present_info.p_results as *mut vk::Result,

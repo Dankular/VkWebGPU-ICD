@@ -354,6 +354,50 @@ pub fn get_image_view_data(image_view: vk::ImageView) -> Option<Arc<VkImageViewD
     IMAGE_VIEW_ALLOCATOR.get(image_view.as_raw())
 }
 
+/// Register a pre-created wgpu Texture as a VkImage in the allocator.
+/// Used by the swapchain module to back swapchain images with real render targets.
+/// Returns a VkImage handle that can be used with all image APIs.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn create_swapchain_image(
+    device: vk::Device,
+    format: vk::Format,
+    extent: vk::Extent2D,
+    wgpu_texture: wgpu::Texture,
+) -> vk::Image {
+    let image_data = VkImageData {
+        device,
+        image_type: vk::ImageType::TYPE_2D,
+        format,
+        extent: vk::Extent3D {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+        },
+        mip_levels: 1,
+        array_layers: 1,
+        samples: vk::SampleCountFlags::TYPE_1,
+        tiling: vk::ImageTiling::OPTIMAL,
+        usage: vk::ImageUsageFlags::COLOR_ATTACHMENT
+            | vk::ImageUsageFlags::TRANSFER_SRC
+            | vk::ImageUsageFlags::TRANSFER_DST
+            | vk::ImageUsageFlags::SAMPLED,
+        sharing_mode: vk::SharingMode::EXCLUSIVE,
+        initial_layout: vk::ImageLayout::UNDEFINED,
+        memory: RwLock::new(None),
+        memory_offset: RwLock::new(0),
+        wgpu_texture: RwLock::new(Some(Arc::new(wgpu_texture))),
+    };
+    let handle = IMAGE_ALLOCATOR.allocate(image_data);
+    vk::Image::from_raw(handle)
+}
+
+/// Remove a swapchain image from the image allocator.
+pub fn destroy_swapchain_image(image: vk::Image) {
+    if image.as_raw() != 0 {
+        IMAGE_ALLOCATOR.remove(image.as_raw());
+    }
+}
+
 pub unsafe fn get_image_subresource_layout(
     _device: vk::Device,
     image: vk::Image,

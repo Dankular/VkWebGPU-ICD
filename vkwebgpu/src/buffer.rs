@@ -65,6 +65,15 @@ pub unsafe fn destroy_buffer(
         return;
     }
 
+    // Unregister from memory flush tracking before removing the buffer.
+    if let Some(buf_data) = BUFFER_ALLOCATOR.get(buffer.as_raw()) {
+        let mem_guard = buf_data.memory.read();
+        let wgpu_guard = buf_data.wgpu_buffer.read();
+        if let (Some(mem), Some(wgpu_buf)) = (mem_guard.as_ref(), wgpu_guard.as_ref()) {
+            memory::unregister_bound_buffer(*mem, wgpu_buf);
+        }
+    }
+
     BUFFER_ALLOCATOR.remove(buffer.as_raw());
     debug!("Destroyed buffer");
 }
@@ -113,7 +122,18 @@ pub unsafe fn bind_buffer_memory(
                 .write_buffer(&wgpu_buffer, 0, data_slice);
         }
 
-        *buffer_data.wgpu_buffer.write() = Some(Arc::new(wgpu_buffer));
+        let wgpu_buffer_arc = Arc::new(wgpu_buffer);
+
+        // Register in memory's flush list so future map/unmap cycles keep the
+        // wgpu buffer in sync with CPU writes.
+        memory::register_bound_buffer(
+            memory,
+            Arc::clone(&wgpu_buffer_arc),
+            memory_offset,
+            buffer_data.size,
+        );
+
+        *buffer_data.wgpu_buffer.write() = Some(wgpu_buffer_arc);
     }
 
     debug!("Bound buffer to memory at offset {}", memory_offset);
