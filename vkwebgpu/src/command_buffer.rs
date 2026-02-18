@@ -523,13 +523,20 @@ pub fn get_command_buffer_data(
 }
 
 /// Replay recorded commands to create a WebGPU command buffer
-/// TODO: This is a simplified stub - needs full implementation with proper lifetime management
+///
+/// This function handles the complex lifetime management required to bridge Vulkan's
+/// deferred recording model with WebGPU's scoped render passes. We use unsafe lifetime
+/// extension to keep render/compute passes alive for the duration of their commands,
+/// which is safe because we control the scope and ensure passes are dropped before
+/// encoder.finish().
 #[cfg(not(target_arch = "wasm32"))]
 pub fn replay_commands(
     cmd_data: &VkCommandBufferData,
     backend: &WebGPUBackend,
 ) -> Result<CommandBuffer> {
-    let encoder = backend
+    use crate::{buffer, descriptor, framebuffer, image, pipeline, render_pass};
+
+    let mut encoder = backend
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("VkWebGPU Command Encoder"),
@@ -537,34 +544,568 @@ pub fn replay_commands(
 
     let commands = cmd_data.commands.read();
 
-    debug!(
-        "Replaying {} recorded commands (stub implementation)",
-        commands.len()
-    );
+    debug!("Replaying {} recorded commands", commands.len());
 
-    // TODO: Implement full command replay with proper WebGPU resource lifetime management
-    // The challenge is that WebGPU RenderPass/ComputePass lifetimes conflict with Vulkan's model
-    // Need to carefully manage Arc references and ensure WebGPU resources outlive pass encoders
+    // Active pass state - only one can be active at a time
+    // We use Option<Box<_>> to allow taking ownership when we need to drop
+    let mut active_render_pass: Option<Box<wgpu::RenderPass>> = None;
+    let mut active_compute_pass: Option<Box<wgpu::ComputePass>> = None;
 
-    // Stub implementation - just log commands for now
+    // Keep Arc references alive for the duration of command replay
+    // This ensures WebGPU resources aren't dropped while passes reference them
+    let mut _resource_refs: Vec<Arc<dyn std::any::Any + Send + Sync>> = Vec::new();
+
+    // Track the active compute pipeline for dispatch commands
+    let mut active_compute_pipeline: Option<Arc<wgpu::ComputePipeline>> = None;
+
     for command in commands.iter() {
         match command {
-            RecordedCommand::BeginRenderPass { .. } => debug!("Replay: BeginRenderPass"),
-            RecordedCommand::EndRenderPass => debug!("Replay: EndRenderPass"),
-            RecordedCommand::BindPipeline { .. } => debug!("Replay: BindPipeline"),
-            RecordedCommand::BindVertexBuffers { .. } => debug!("Replay: BindVertexBuffers"),
-            RecordedCommand::BindIndexBuffer { .. } => debug!("Replay: BindIndexBuffer"),
-            RecordedCommand::BindDescriptorSets { .. } => debug!("Replay: BindDescriptorSets"),
-            RecordedCommand::Draw { .. } => debug!("Replay: Draw"),
-            RecordedCommand::DrawIndexed { .. } => debug!("Replay: DrawIndexed"),
-            RecordedCommand::Dispatch { .. } => debug!("Replay: Dispatch"),
-            RecordedCommand::CopyBuffer { .. } => debug!("Replay: CopyBuffer"),
-            RecordedCommand::CopyBufferToImage { .. } => debug!("Replay: CopyBufferToImage"),
-            RecordedCommand::PipelineBarrier { .. } => debug!("Replay: PipelineBarrier"),
+            RecordedCommand::BeginRenderPass {
+                render_pass,
+                framebuffer,
+                render_area: _,
+                clear_values,
+            } => {
+                debug!("Replay: BeginRenderPass");
+
+                // Drop any active passes before starting a new one
+                drop(active_render_pass.take());
+                drop(active_compute_pass.take());
+
+                // Get framebuffer data
+                let fb_data = framebuffer::get_framebuffer_data(*framebuffer)
+                    .ok_or_else(|| VkError::InvalidHandle("Invalid framebuffer".to_string()))?;
+
+                // Get render pass data for attachment info
+                let rp_data = render_pass::get_render_pass_data(*render_pass)
+                    .ok_or_else(|| VkError::InvalidHandle("Invalid render pass".to_string()))?;
+
+                // Build color attachments from framebuffer
+                // We need to collect Arc<TextureView> references first, then build descriptors
+                let mut view_arcs: Vec<Arc<wgpu::TextureView>> = Vec::new();
+                let mut attachment_info: Vec<(bool, wgpu::Color, f32)> = Vec::new(); // (is_depth, clear_color, clear_depth)
+
+                for (i, &image_view_handle) in fb_data.attachments.iter().enumerate() {
+                    let view_data = image::get_image_view_data(image_view_handle)
+                        .ok_or_else(|| VkError::InvalidHandle("Invalid image view".to_string()))?;
+
+                    // Get the WebGPU texture view Arc and clone it
+                    let wgpu_view_arc = {
+                        let guard = view_data.wgpu_view.read();
+                        guard
+                            .as_ref()
+                            .ok_or_else(|| {
+                                VkError::InvalidHandle("Image view not bound".to_string())
+                            })?
+                            .clone()
+                    };
+
+                    // Determine if this is a color or depth/stencil attachment
+                    let is_depth_stencil = if i < rp_data.attachments.len() {
+                        let format = rp_data.attachments[i].format;
+                        format == vk::Format::D16_UNORM
+                            || format == vk::Format::D32_SFLOAT
+                            || format == vk::Format::D24_UNORM_S8_UINT
+                            || format == vk::Format::D32_SFLOAT_S8_UINT
+                    } else {
+                        false
+                    };
+
+                    let (clear_color, clear_depth) = if is_depth_stencil {
+                        let depth = if i < clear_values.len() {
+                            unsafe { clear_values[i].depth_stencil.depth }
+                        } else {
+                            1.0
+                        };
+                        (wgpu::Color::BLACK, depth)
+                    } else {
+                        let color = if i < clear_values.len() {
+                            let cv = unsafe { clear_values[i].color };
+                            wgpu::Color {
+                                r: unsafe { cv.float32[0] } as f64,
+                                g: unsafe { cv.float32[1] } as f64,
+                                b: unsafe { cv.float32[2] } as f64,
+                                a: unsafe { cv.float32[3] } as f64,
+                            }
+                        } else {
+                            wgpu::Color::BLACK
+                        };
+                        (color, 1.0)
+                    };
+
+                    view_arcs.push(wgpu_view_arc);
+                    attachment_info.push((is_depth_stencil, clear_color, clear_depth));
+                }
+
+                // Now build the attachment descriptors using unsafe lifetime extension
+                // SAFETY: We keep view_arcs alive until the render pass is dropped
+                let mut color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> =
+                    Vec::new();
+                let mut depth_stencil_attachment: Option<wgpu::RenderPassDepthStencilAttachment> =
+                    None;
+
+                for (_i, (view_arc, (is_depth, clear_color, clear_depth))) in
+                    view_arcs.iter().zip(attachment_info.iter()).enumerate()
+                {
+                    let view_ref: &'static wgpu::TextureView =
+                        unsafe { std::mem::transmute(view_arc.as_ref()) };
+
+                    if *is_depth {
+                        depth_stencil_attachment = Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: view_ref,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(*clear_depth),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                        });
+                    } else {
+                        color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                            view: view_ref,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(*clear_color),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }));
+                    }
+                }
+
+                // Keep the Arc references alive for the duration of the render pass
+                _resource_refs.extend(
+                    view_arcs
+                        .into_iter()
+                        .map(|v| v as Arc<dyn std::any::Any + Send + Sync>),
+                );
+
+                // SAFETY: We extend the lifetime of the encoder reference to create a render pass
+                // This is safe because:
+                // 1. We control the scope - the render pass is dropped before encoder.finish()
+                // 2. We store it in active_render_pass which is dropped before the function returns
+                // 3. The encoder lives for the entire function scope
+                let encoder_ptr = &mut encoder as *mut wgpu::CommandEncoder;
+                let encoder_ref: &'static mut wgpu::CommandEncoder = unsafe { &mut *encoder_ptr };
+
+                let render_pass = encoder_ref.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("VkRenderPass"),
+                    color_attachments: &color_attachments,
+                    depth_stencil_attachment,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                active_render_pass = Some(Box::new(render_pass));
+            }
+
+            RecordedCommand::EndRenderPass => {
+                debug!("Replay: EndRenderPass");
+                // Drop the active render pass
+                drop(active_render_pass.take());
+            }
+
+            RecordedCommand::BindPipeline {
+                bind_point,
+                pipeline,
+            } => {
+                debug!("Replay: BindPipeline");
+
+                match *bind_point {
+                    vk::PipelineBindPoint::GRAPHICS => {
+                        if let Some(ref mut pass) = active_render_pass {
+                            let pipeline_data =
+                                pipeline::get_pipeline_data(*pipeline).ok_or_else(|| {
+                                    VkError::InvalidHandle("Invalid pipeline".to_string())
+                                })?;
+
+                            match pipeline_data.as_ref() {
+                                pipeline::VkPipelineData::Graphics { wgpu_pipeline, .. } => {
+                                    let pipeline_arc = wgpu_pipeline.clone();
+                                    // SAFETY: We extend the lifetime to static. This is safe because
+                                    // we keep pipeline_arc alive in _resource_refs until the pass is dropped.
+                                    let pipeline_ref: &'static wgpu::RenderPipeline =
+                                        unsafe { std::mem::transmute(pipeline_arc.as_ref()) };
+                                    _resource_refs
+                                        .push(pipeline_arc as Arc<dyn std::any::Any + Send + Sync>);
+                                    pass.set_pipeline(pipeline_ref);
+                                }
+                                _ => {
+                                    return Err(VkError::InvalidHandle(
+                                        "Graphics bind point requires graphics pipeline"
+                                            .to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    vk::PipelineBindPoint::COMPUTE => {
+                        // Compute pass will be created on-demand in Dispatch
+                        // Store the pipeline for later use
+                        let pipeline_data =
+                            pipeline::get_pipeline_data(*pipeline).ok_or_else(|| {
+                                VkError::InvalidHandle("Invalid pipeline".to_string())
+                            })?;
+
+                        match pipeline_data.as_ref() {
+                            pipeline::VkPipelineData::Compute { wgpu_pipeline, .. } => {
+                                active_compute_pipeline = Some(wgpu_pipeline.clone());
+                            }
+                            _ => {
+                                return Err(VkError::InvalidHandle(
+                                    "Compute bind point requires compute pipeline".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            RecordedCommand::BindVertexBuffers {
+                first_binding,
+                buffers,
+                offsets,
+            } => {
+                debug!("Replay: BindVertexBuffers");
+
+                if let Some(ref mut pass) = active_render_pass {
+                    for (i, (&buffer_handle, &offset)) in
+                        buffers.iter().zip(offsets.iter()).enumerate()
+                    {
+                        let buffer_data = buffer::get_buffer_data(buffer_handle)
+                            .ok_or_else(|| VkError::InvalidHandle("Invalid buffer".to_string()))?;
+
+                        let wgpu_buffer_arc = {
+                            let guard = buffer_data.wgpu_buffer.read();
+                            guard
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    VkError::InvalidHandle("Buffer not bound".to_string())
+                                })?
+                                .clone()
+                        };
+
+                        // SAFETY: Extend lifetime - buffer is kept alive in _resource_refs
+                        let buffer_ref: &'static wgpu::Buffer =
+                            unsafe { std::mem::transmute(wgpu_buffer_arc.as_ref()) };
+
+                        _resource_refs
+                            .push(wgpu_buffer_arc as Arc<dyn std::any::Any + Send + Sync>);
+
+                        let slot = first_binding + i as u32;
+                        pass.set_vertex_buffer(slot, buffer_ref.slice(offset..));
+                    }
+                }
+            }
+
+            RecordedCommand::BindIndexBuffer {
+                buffer,
+                offset,
+                index_type,
+            } => {
+                debug!("Replay: BindIndexBuffer");
+
+                if let Some(ref mut pass) = active_render_pass {
+                    let buffer_data = buffer::get_buffer_data(*buffer)
+                        .ok_or_else(|| VkError::InvalidHandle("Invalid buffer".to_string()))?;
+
+                    let wgpu_buffer_arc = {
+                        let guard = buffer_data.wgpu_buffer.read();
+                        guard
+                            .as_ref()
+                            .ok_or_else(|| VkError::InvalidHandle("Buffer not bound".to_string()))?
+                            .clone()
+                    };
+
+                    // SAFETY: Extend lifetime - buffer is kept alive in _resource_refs
+                    let buffer_ref: &'static wgpu::Buffer =
+                        unsafe { std::mem::transmute(wgpu_buffer_arc.as_ref()) };
+
+                    _resource_refs.push(wgpu_buffer_arc as Arc<dyn std::any::Any + Send + Sync>);
+
+                    let format = match *index_type {
+                        vk::IndexType::UINT16 => wgpu::IndexFormat::Uint16,
+                        vk::IndexType::UINT32 => wgpu::IndexFormat::Uint32,
+                        _ => wgpu::IndexFormat::Uint32,
+                    };
+
+                    pass.set_index_buffer(buffer_ref.slice(*offset..), format);
+                }
+            }
+
+            RecordedCommand::BindDescriptorSets {
+                bind_point,
+                layout: _,
+                first_set,
+                descriptor_sets,
+                dynamic_offsets,
+            } => {
+                debug!("Replay: BindDescriptorSets");
+
+                for (i, &desc_set_handle) in descriptor_sets.iter().enumerate() {
+                    let desc_data = descriptor::get_descriptor_set_data(desc_set_handle)
+                        .ok_or_else(|| {
+                            VkError::InvalidHandle("Invalid descriptor set".to_string())
+                        })?;
+
+                    let wgpu_bind_group_arc = {
+                        let guard = desc_data.wgpu_bind_group.read();
+                        guard
+                            .as_ref()
+                            .ok_or_else(|| {
+                                VkError::InvalidHandle("Descriptor set not updated".to_string())
+                            })?
+                            .clone()
+                    };
+
+                    // SAFETY: Extend lifetime - bind group is kept alive in _resource_refs
+                    let bind_group_ref: &'static wgpu::BindGroup =
+                        unsafe { std::mem::transmute(wgpu_bind_group_arc.as_ref()) };
+
+                    _resource_refs
+                        .push(wgpu_bind_group_arc as Arc<dyn std::any::Any + Send + Sync>);
+
+                    let set_index = first_set + i as u32;
+
+                    // Extract dynamic offsets for this set (if any)
+                    // FIXME: This is a simplified implementation that only handles single descriptor sets correctly.
+                    // For multiple descriptor sets with dynamic offsets, proper offset distribution requires
+                    // tracking the number of dynamic descriptors per set from the pipeline layout.
+                    let offsets_slice = if !dynamic_offsets.is_empty() {
+                        if descriptor_sets.len() == 1 {
+                            // Single descriptor set: pass all dynamic offsets to it
+                            dynamic_offsets.as_slice()
+                        } else {
+                            // Multiple descriptor sets: cannot distribute offsets correctly without
+                            // tracking dynamic descriptor counts per set from pipeline layout.
+                            // TODO: Implement proper offset distribution by tracking dynamic counts.
+                            if i == 0 {
+                                debug!("Warning: Multiple descriptor sets with dynamic offsets not fully supported yet");
+                            }
+                            &[]
+                        }
+                    } else {
+                        &[]
+                    };
+
+                    match *bind_point {
+                        vk::PipelineBindPoint::GRAPHICS => {
+                            if let Some(ref mut pass) = active_render_pass {
+                                pass.set_bind_group(set_index, bind_group_ref, offsets_slice);
+                            }
+                        }
+                        vk::PipelineBindPoint::COMPUTE => {
+                            if let Some(ref mut pass) = active_compute_pass {
+                                pass.set_bind_group(set_index, bind_group_ref, offsets_slice);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            RecordedCommand::Draw {
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            } => {
+                debug!(
+                    "Replay: Draw({} vertices, {} instances)",
+                    vertex_count, instance_count
+                );
+
+                if let Some(ref mut pass) = active_render_pass {
+                    pass.draw(
+                        *first_vertex..*first_vertex + *vertex_count,
+                        *first_instance..*first_instance + *instance_count,
+                    );
+                }
+            }
+
+            RecordedCommand::DrawIndexed {
+                index_count,
+                instance_count,
+                first_index,
+                vertex_offset,
+                first_instance,
+            } => {
+                debug!(
+                    "Replay: DrawIndexed({} indices, {} instances)",
+                    index_count, instance_count
+                );
+
+                if let Some(ref mut pass) = active_render_pass {
+                    pass.draw_indexed(
+                        *first_index..*first_index + *index_count,
+                        *vertex_offset,
+                        *first_instance..*first_instance + *instance_count,
+                    );
+                }
+            }
+
+            RecordedCommand::Dispatch {
+                group_count_x,
+                group_count_y,
+                group_count_z,
+            } => {
+                debug!(
+                    "Replay: Dispatch({}x{}x{})",
+                    group_count_x, group_count_y, group_count_z
+                );
+
+                // Drop any active render pass before compute
+                drop(active_render_pass.take());
+
+                // Create compute pass if needed
+                if active_compute_pass.is_none() {
+                    // SAFETY: Same lifetime extension as render pass
+                    let encoder_ptr = &mut encoder as *mut wgpu::CommandEncoder;
+                    let encoder_ref: &'static mut wgpu::CommandEncoder =
+                        unsafe { &mut *encoder_ptr };
+
+                    let compute_pass =
+                        encoder_ref.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("VkComputePass"),
+                            timestamp_writes: None,
+                        });
+
+                    active_compute_pass = Some(Box::new(compute_pass));
+                }
+
+                if let Some(ref mut pass) = active_compute_pass {
+                    // Bind the compute pipeline if one is active
+                    if let Some(ref pipeline_arc) = active_compute_pipeline {
+                        // SAFETY: We extend the lifetime to static. This is safe because
+                        // we keep pipeline_arc alive in _resource_refs until the pass is dropped.
+                        let pipeline_ref: &'static wgpu::ComputePipeline =
+                            unsafe { std::mem::transmute(pipeline_arc.as_ref()) };
+                        _resource_refs
+                            .push(pipeline_arc.clone() as Arc<dyn std::any::Any + Send + Sync>);
+                        pass.set_pipeline(pipeline_ref);
+                    }
+
+                    pass.dispatch_workgroups(*group_count_x, *group_count_y, *group_count_z);
+                }
+
+                // End compute pass after dispatch
+                drop(active_compute_pass.take());
+            }
+
+            RecordedCommand::CopyBuffer {
+                src_buffer,
+                dst_buffer,
+                regions,
+            } => {
+                debug!("Replay: CopyBuffer");
+
+                // Drop any active passes before copy operations
+                drop(active_render_pass.take());
+                drop(active_compute_pass.take());
+
+                let src_data = buffer::get_buffer_data(*src_buffer)
+                    .ok_or_else(|| VkError::InvalidHandle("Invalid source buffer".to_string()))?;
+                let dst_data = buffer::get_buffer_data(*dst_buffer).ok_or_else(|| {
+                    VkError::InvalidHandle("Invalid destination buffer".to_string())
+                })?;
+
+                let src_wgpu_guard = src_data.wgpu_buffer.read();
+                let dst_wgpu_guard = dst_data.wgpu_buffer.read();
+
+                let src_wgpu = src_wgpu_guard
+                    .as_ref()
+                    .ok_or_else(|| VkError::InvalidHandle("Source buffer not bound".to_string()))?;
+                let dst_wgpu = dst_wgpu_guard.as_ref().ok_or_else(|| {
+                    VkError::InvalidHandle("Destination buffer not bound".to_string())
+                })?;
+
+                for region in regions {
+                    encoder.copy_buffer_to_buffer(
+                        src_wgpu.as_ref(),
+                        region.src_offset,
+                        dst_wgpu.as_ref(),
+                        region.dst_offset,
+                        region.size,
+                    );
+                }
+            }
+
+            RecordedCommand::CopyBufferToImage {
+                src_buffer,
+                dst_image,
+                dst_image_layout: _,
+                regions,
+            } => {
+                debug!("Replay: CopyBufferToImage");
+
+                // Drop any active passes
+                drop(active_render_pass.take());
+                drop(active_compute_pass.take());
+
+                let src_data = buffer::get_buffer_data(*src_buffer)
+                    .ok_or_else(|| VkError::InvalidHandle("Invalid source buffer".to_string()))?;
+                let dst_data = image::get_image_data(*dst_image).ok_or_else(|| {
+                    VkError::InvalidHandle("Invalid destination image".to_string())
+                })?;
+
+                let src_wgpu_guard = src_data.wgpu_buffer.read();
+                let dst_wgpu_guard = dst_data.wgpu_texture.read();
+
+                let src_wgpu = src_wgpu_guard
+                    .as_ref()
+                    .ok_or_else(|| VkError::InvalidHandle("Source buffer not bound".to_string()))?;
+                let dst_wgpu = dst_wgpu_guard.as_ref().ok_or_else(|| {
+                    VkError::InvalidHandle("Destination image not bound".to_string())
+                })?;
+
+                for region in regions {
+                    // Calculate proper bytes_per_row from format
+                    let bytes_per_pixel = crate::format::format_size(dst_data.format)
+                        .ok_or_else(|| VkError::FormatNotSupported)?;
+                    let bytes_per_row = region.image_extent.width * bytes_per_pixel;
+
+                    encoder.copy_buffer_to_texture(
+                        wgpu::ImageCopyBuffer {
+                            buffer: src_wgpu.as_ref(),
+                            layout: wgpu::ImageDataLayout {
+                                offset: region.buffer_offset,
+                                bytes_per_row: Some(bytes_per_row),
+                                rows_per_image: Some(region.image_extent.height),
+                            },
+                        },
+                        wgpu::ImageCopyTexture {
+                            texture: dst_wgpu.as_ref(),
+                            mip_level: region.image_subresource.mip_level,
+                            origin: wgpu::Origin3d {
+                                x: region.image_offset.x as u32,
+                                y: region.image_offset.y as u32,
+                                z: region.image_offset.z as u32,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::Extent3d {
+                            width: region.image_extent.width,
+                            height: region.image_extent.height,
+                            depth_or_array_layers: region.image_extent.depth,
+                        },
+                    );
+                }
+            }
+
+            RecordedCommand::PipelineBarrier { .. } => {
+                debug!("Replay: PipelineBarrier (no-op)");
+                // WebGPU handles synchronization implicitly
+            }
         }
     }
 
-    // Return an empty command buffer for now
+    // Ensure all passes are dropped before finishing
+    drop(active_render_pass);
+    drop(active_compute_pass);
+
+    // Finish and return the command buffer
     Ok(encoder.finish())
 }
 
@@ -574,7 +1115,7 @@ pub fn replay_commands(
     _backend: &WebGPUBackend,
 ) -> Result<CommandBuffer> {
     // WASM implementation would go here
-    Err(VkError::NotImplemented(
+    Err(VkError::FeatureNotSupported(
         "WASM command replay not yet implemented".to_string(),
     ))
 }
