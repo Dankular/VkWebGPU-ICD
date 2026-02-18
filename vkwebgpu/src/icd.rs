@@ -63,6 +63,10 @@ pub unsafe extern "system" fn vk_icdGetInstanceProcAddr(
         b"vkGetDeviceProcAddr" => {
             std::mem::transmute(vkGetDeviceProcAddr as vk::PFN_vkGetDeviceProcAddr)
         }
+        b"vkGetPhysicalDeviceSparseImageFormatProperties" => std::mem::transmute(
+            vkGetPhysicalDeviceSparseImageFormatProperties
+                as vk::PFN_vkGetPhysicalDeviceSparseImageFormatProperties,
+        ),
         _ => None,
     }
 }
@@ -71,16 +75,6 @@ pub unsafe extern "system" fn vk_icdGetInstanceProcAddr(
 pub unsafe extern "system" fn vk_icdNegotiateLoaderICDInterfaceVersion(
     p_supported_version: *mut u32,
 ) -> vk::Result {
-    // Write to a debug file to confirm this function is called
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("Z:\\vkwebgpu_debug.log")
-    {
-        let _ = writeln!(f, "vk_icdNegotiateLoaderICDInterfaceVersion called");
-    }
-
     if p_supported_version.is_null() {
         return vk::Result::ERROR_INITIALIZATION_FAILED;
     }
@@ -125,40 +119,12 @@ pub unsafe extern "system" fn vkCreateInstance(
     p_allocator: *const vk::AllocationCallbacks,
     p_instance: *mut vk::Instance,
 ) -> vk::Result {
-    // Write to debug file
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("Z:\\vkwebgpu_debug.log")
-    {
-        let _ = writeln!(f, "vkCreateInstance called");
-    }
-
     crate::init();
     info!("vkCreateInstance called");
 
     match crate::instance::create_instance(p_create_info, p_allocator, p_instance) {
-        Ok(_) => {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("Z:\\vkwebgpu_debug.log")
-            {
-                let _ = writeln!(f, "vkCreateInstance SUCCESS");
-            }
-            vk::Result::SUCCESS
-        }
-        Err(e) => {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("Z:\\vkwebgpu_debug.log")
-            {
-                let _ = writeln!(f, "vkCreateInstance FAILED: {:?}", e);
-            }
-            e.to_vk_result()
-        }
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
     }
 }
 
@@ -269,6 +235,23 @@ pub unsafe extern "system" fn vkGetPhysicalDeviceFormatProperties(
         format,
         p_format_properties,
     );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceSparseImageFormatProperties(
+    _physical_device: vk::PhysicalDevice,
+    _format: vk::Format,
+    _type: vk::ImageType,
+    _samples: vk::SampleCountFlags,
+    _usage: vk::ImageUsageFlags,
+    _tiling: vk::ImageTiling,
+    p_property_count: *mut u32,
+    _p_properties: *mut vk::SparseImageFormatProperties,
+) {
+    // WebGPU doesn't support sparse images, so return 0 properties
+    if !p_property_count.is_null() {
+        *p_property_count = 0;
+    }
 }
 
 #[no_mangle]
