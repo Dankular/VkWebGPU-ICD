@@ -340,6 +340,21 @@ pub unsafe extern "system" fn vkGetDeviceProcAddr(
             std::mem::transmute(vkDestroySemaphore as vk::PFN_vkDestroySemaphore)
         }
 
+        // Swapchain (KHR extension)
+        b"vkCreateSwapchainKHR" => {
+            std::mem::transmute(vkCreateSwapchainKHR as vk::PFN_vkCreateSwapchainKHR)
+        }
+        b"vkDestroySwapchainKHR" => {
+            std::mem::transmute(vkDestroySwapchainKHR as vk::PFN_vkDestroySwapchainKHR)
+        }
+        b"vkGetSwapchainImagesKHR" => {
+            std::mem::transmute(vkGetSwapchainImagesKHR as vk::PFN_vkGetSwapchainImagesKHR)
+        }
+        b"vkAcquireNextImageKHR" => {
+            std::mem::transmute(vkAcquireNextImageKHR as vk::PFN_vkAcquireNextImageKHR)
+        }
+        b"vkQueuePresentKHR" => std::mem::transmute(vkQueuePresentKHR as vk::PFN_vkQueuePresentKHR),
+
         _ => None,
     }
 }
@@ -1168,4 +1183,77 @@ pub unsafe extern "system" fn vkDestroySemaphore(
     p_allocator: *const vk::AllocationCallbacks,
 ) {
     crate::sync::destroy_semaphore(device, semaphore, p_allocator);
+}
+
+// Swapchain functions (KHR extension)
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCreateSwapchainKHR(
+    device: vk::Device,
+    p_create_info: *const vk::SwapchainCreateInfoKHR,
+    p_allocator: *const vk::AllocationCallbacks,
+    p_swapchain: *mut vk::SwapchainKHR,
+) -> vk::Result {
+    match crate::swapchain::create_swapchain_khr(device, p_create_info, p_allocator, p_swapchain) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkDestroySwapchainKHR(
+    _device: vk::Device,
+    swapchain: vk::SwapchainKHR,
+    p_allocator: *const vk::AllocationCallbacks,
+) {
+    crate::swapchain::destroy_swapchain_khr(swapchain, p_allocator);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetSwapchainImagesKHR(
+    _device: vk::Device,
+    swapchain: vk::SwapchainKHR,
+    p_swapchain_image_count: *mut u32,
+    p_swapchain_images: *mut vk::Image,
+) -> vk::Result {
+    match crate::swapchain::get_swapchain_images_khr(
+        swapchain,
+        p_swapchain_image_count,
+        p_swapchain_images,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkAcquireNextImageKHR(
+    _device: vk::Device,
+    swapchain: vk::SwapchainKHR,
+    timeout: u64,
+    semaphore: vk::Semaphore,
+    fence: vk::Fence,
+    p_image_index: *mut u32,
+) -> vk::Result {
+    match crate::swapchain::acquire_next_image_khr(
+        swapchain,
+        timeout,
+        semaphore,
+        fence,
+        p_image_index,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkQueuePresentKHR(
+    queue: vk::Queue,
+    p_present_info: *const vk::PresentInfoKHR,
+) -> vk::Result {
+    match crate::swapchain::queue_present_khr(queue, p_present_info) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
 }
