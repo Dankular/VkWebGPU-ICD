@@ -23,7 +23,7 @@ pub static COMMAND_BUFFER_ALLOCATOR: Lazy<HandleAllocator<VkCommandBufferData>> 
 // ---------------------------------------------------------------------------
 // WGSL blit-image shader
 // ---------------------------------------------------------------------------
-// Used by the BlitImage2 replay arm to implement vkCmdBlitImage via a
+// Used by the BlitImage and BlitImage2 replay arms to implement vkCmdBlitImage via a
 // fullscreen-triangle render pass.  A uniform buffer carries the UV transform
 // that maps [0,1] across the destination viewport to the source sub-region.
 //
@@ -2985,17 +2985,229 @@ pub fn replay_commands(
             }
 
             RecordedCommand::BlitImage {
-                src_image: _,
+                src_image,
                 src_image_layout: _,
-                dst_image: _,
+                dst_image,
                 dst_image_layout: _,
-                regions: _,
-                filter: _,
+                regions,
+                filter,
             } => {
-                debug!("Replay: BlitImage (not fully implemented - would require compute shader)");
-                // WebGPU doesn't have direct blit support
-                // This would need to be implemented via a compute shader or render pass
-                // For now, log and skip - most uses are covered by CopyImage
+                // Same implementation as BlitImage2 — delegate via a synthetic BlitImage2 command.
+                debug!("Replay: BlitImage: {} region(s) (same path as BlitImage2)", regions.len());
+                drop(active_render_pass.take());
+                drop(active_compute_pass.take());
+
+                let src_data = match image::get_image_data(*src_image) {
+                    Some(d) => d,
+                    None => { debug!("BlitImage: invalid src"); continue; }
+                };
+                let dst_data = match image::get_image_data(*dst_image) {
+                    Some(d) => d,
+                    None => { debug!("BlitImage: invalid dst"); continue; }
+                };
+                let src_guard = src_data.wgpu_texture.read();
+                let dst_guard = dst_data.wgpu_texture.read();
+                let src_wgpu = match src_guard.as_ref() {
+                    Some(t) => t,
+                    None => { debug!("BlitImage: src not GPU-bound"); continue; }
+                };
+                let dst_wgpu = match dst_guard.as_ref() {
+                    Some(t) => t,
+                    None => { debug!("BlitImage: dst not GPU-bound"); continue; }
+                };
+
+                let formats_match = src_data.format == dst_data.format;
+                let dst_wgpu_format = match crate::format::vk_to_wgpu_format(dst_data.format) {
+                    Some(f) => f,
+                    None => { debug!("BlitImage: unsupported dst format, skipping"); continue; }
+                };
+                let filter_mode = if *filter == vk::Filter::LINEAR {
+                    wgpu::FilterMode::Linear
+                } else {
+                    wgpu::FilterMode::Nearest
+                };
+
+                let shader = backend.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("blit_image_shader"),
+                    source: wgpu::ShaderSource::Wgsl(BLIT_IMAGE_WGSL.into()),
+                });
+                let blit_bgl = backend.device.create_bind_group_layout(
+                    &wgpu::BindGroupLayoutDescriptor {
+                        label: Some("blit_image_bgl"),
+                        entries: &[
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 0,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Texture {
+                                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                    view_dimension: wgpu::TextureViewDimension::D2,
+                                    multisampled: false,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 1,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 2,
+                                visibility: wgpu::ShaderStages::VERTEX,
+                                ty: wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Uniform,
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
+                            },
+                        ],
+                    },
+                );
+                let pipeline_layout = backend.device.create_pipeline_layout(
+                    &wgpu::PipelineLayoutDescriptor {
+                        label: Some("blit_image_pl"),
+                        bind_group_layouts: &[&blit_bgl],
+                        push_constant_ranges: &[],
+                    },
+                );
+                let sampler = backend.device.create_sampler(&wgpu::SamplerDescriptor {
+                    label: Some("blit_image_sampler"),
+                    address_mode_u: wgpu::AddressMode::ClampToEdge,
+                    address_mode_v: wgpu::AddressMode::ClampToEdge,
+                    address_mode_w: wgpu::AddressMode::ClampToEdge,
+                    mag_filter: filter_mode,
+                    min_filter: filter_mode,
+                    mipmap_filter: wgpu::FilterMode::Nearest,
+                    ..Default::default()
+                });
+                let pipeline = backend.device.create_render_pipeline(
+                    &wgpu::RenderPipelineDescriptor {
+                        label: Some("blit_image_pipeline"),
+                        layout: Some(&pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &shader,
+                            entry_point: "vs_blit",
+                            buffers: &[],
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &shader,
+                            entry_point: "fs_blit",
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: dst_wgpu_format,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleList,
+                            ..Default::default()
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview: None,
+                    },
+                );
+
+                for region in regions {
+                    let sx0 = region.src_offsets[0].x; let sy0 = region.src_offsets[0].y;
+                    let sx1 = region.src_offsets[1].x; let sy1 = region.src_offsets[1].y;
+                    let dx0 = region.dst_offsets[0].x; let dy0 = region.dst_offsets[0].y;
+                    let dx1 = region.dst_offsets[1].x; let dy1 = region.dst_offsets[1].y;
+                    let sw = (sx1 - sx0).abs() as u32;
+                    let sh = (sy1 - sy0).abs() as u32;
+                    let dw = (dx1 - dx0).abs() as u32;
+                    let dh = (dy1 - dy0).abs() as u32;
+                    if sw == 0 || sh == 0 || dw == 0 || dh == 0 { continue; }
+
+                    let is_simple = formats_match && sw == dw && sh == dh
+                        && sx0 >= 0 && sy0 >= 0 && dx0 >= 0 && dy0 >= 0
+                        && sx1 > sx0 && sy1 > sy0 && dx1 > dx0 && dy1 > dy0;
+                    if is_simple {
+                        encoder.copy_texture_to_texture(
+                            wgpu::ImageCopyTexture {
+                                texture: src_wgpu.as_ref(),
+                                mip_level: region.src_subresource.mip_level,
+                                origin: wgpu::Origin3d {
+                                    x: sx0 as u32, y: sy0 as u32,
+                                    z: region.src_subresource.base_array_layer,
+                                },
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::ImageCopyTexture {
+                                texture: dst_wgpu.as_ref(),
+                                mip_level: region.dst_subresource.mip_level,
+                                origin: wgpu::Origin3d {
+                                    x: dx0 as u32, y: dy0 as u32,
+                                    z: region.dst_subresource.base_array_layer,
+                                },
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::Extent3d { width: sw, height: sh, depth_or_array_layers: 1 },
+                        );
+                        continue;
+                    }
+
+                    let mw = (src_data.extent.width >> region.src_subresource.mip_level).max(1) as f32;
+                    let mh = (src_data.extent.height >> region.src_subresource.mip_level).max(1) as f32;
+                    let ud: [f32; 4] = [
+                        sx0 as f32 / mw, sy0 as f32 / mh,
+                        (sx1 - sx0) as f32 / mw, (sy1 - sy0) as f32 / mh,
+                    ];
+                    let mut ub = [0u8; 16];
+                    ub[0..4].copy_from_slice(&ud[0].to_le_bytes());
+                    ub[4..8].copy_from_slice(&ud[1].to_le_bytes());
+                    ub[8..12].copy_from_slice(&ud[2].to_le_bytes());
+                    ub[12..16].copy_from_slice(&ud[3].to_le_bytes());
+                    let ubuf = backend.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("blit_uniform"),
+                        size: 16,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    backend.queue.write_buffer(&ubuf, 0, &ub);
+
+                    let sv = src_wgpu.create_view(&wgpu::TextureViewDescriptor {
+                        label: Some("blit_src"), dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_mip_level: region.src_subresource.mip_level, mip_level_count: Some(1),
+                        base_array_layer: region.src_subresource.base_array_layer, array_layer_count: Some(1),
+                        ..Default::default()
+                    });
+                    let dv = dst_wgpu.create_view(&wgpu::TextureViewDescriptor {
+                        label: Some("blit_dst"), dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_mip_level: region.dst_subresource.mip_level, mip_level_count: Some(1),
+                        base_array_layer: region.dst_subresource.base_array_layer, array_layer_count: Some(1),
+                        ..Default::default()
+                    });
+                    let bg = backend.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("blit_bg"), layout: &blit_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&sv) },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                            wgpu::BindGroupEntry { binding: 2, resource: ubuf.as_entire_binding() },
+                        ],
+                    });
+                    let vx = dx0.min(dx1).max(0) as u32;
+                    let vy = dy0.min(dy1).max(0) as u32;
+                    {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("BlitImage"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &dv, resolve_target: None,
+                                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None, occlusion_query_set: None,
+                        });
+                        pass.set_pipeline(&pipeline);
+                        pass.set_bind_group(0, &bg, &[]);
+                        pass.set_viewport(vx as f32, vy as f32, dw as f32, dh as f32, 0.0, 1.0);
+                        pass.set_scissor_rect(vx, vy, dw, dh);
+                        pass.draw(0..3, 0..1);
+                    }
+                }
             }
 
             RecordedCommand::PipelineBarrier { .. } => {
