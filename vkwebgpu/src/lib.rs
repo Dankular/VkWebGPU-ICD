@@ -29,7 +29,9 @@ pub mod command_buffer;
 pub mod command_pool;
 pub mod sync;
 pub mod swapchain;
+pub mod surface;
 pub mod push_constants;
+pub mod query;
 pub mod icd;
 
 use log::info;

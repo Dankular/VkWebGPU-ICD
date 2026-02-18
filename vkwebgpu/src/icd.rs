@@ -21,9 +21,9 @@ pub unsafe extern "system" fn vk_icdGetInstanceProcAddr(
     }
 
     let name = CStr::from_ptr(p_name);
-    debug!("vk_icdGetInstanceProcAddr: {:?}", name);
+    let name_str = name.to_bytes();
 
-    match name.to_bytes() {
+    let result = match name_str {
         b"vkCreateInstance" => std::mem::transmute(vkCreateInstance as vk::PFN_vkCreateInstance),
         b"vkDestroyInstance" => std::mem::transmute(vkDestroyInstance as vk::PFN_vkDestroyInstance),
         b"vkEnumerateInstanceVersion" => {
@@ -67,8 +67,68 @@ pub unsafe extern "system" fn vk_icdGetInstanceProcAddr(
             vkGetPhysicalDeviceSparseImageFormatProperties
                 as vk::PFN_vkGetPhysicalDeviceSparseImageFormatProperties,
         ),
+        
+        // Surface functions (KHR)
+        b"vkCreateWin32SurfaceKHR" => {
+            std::mem::transmute(vkCreateWin32SurfaceKHR as vk::PFN_vkCreateWin32SurfaceKHR)
+        }
+        b"vkDestroySurfaceKHR" => {
+            std::mem::transmute(vkDestroySurfaceKHR as vk::PFN_vkDestroySurfaceKHR)
+        }
+        b"vkGetPhysicalDeviceSurfaceSupportKHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceSurfaceSupportKHR as vk::PFN_vkGetPhysicalDeviceSurfaceSupportKHR)
+        }
+        b"vkGetPhysicalDeviceSurfaceCapabilitiesKHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceSurfaceCapabilitiesKHR as vk::PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)
+        }
+        b"vkGetPhysicalDeviceSurfaceFormatsKHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceSurfaceFormatsKHR as vk::PFN_vkGetPhysicalDeviceSurfaceFormatsKHR)
+        }
+        b"vkGetPhysicalDeviceSurfacePresentModesKHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceSurfacePresentModesKHR as vk::PFN_vkGetPhysicalDeviceSurfacePresentModesKHR)
+        }
+
+        // Physical device properties2 (core 1.1 + KHR aliases)
+        b"vkGetPhysicalDeviceProperties2" | b"vkGetPhysicalDeviceProperties2KHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceProperties2 as vk::PFN_vkGetPhysicalDeviceProperties2)
+        }
+        b"vkGetPhysicalDeviceFeatures2" | b"vkGetPhysicalDeviceFeatures2KHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceFeatures2 as vk::PFN_vkGetPhysicalDeviceFeatures2)
+        }
+        b"vkGetPhysicalDeviceMemoryProperties2" | b"vkGetPhysicalDeviceMemoryProperties2KHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceMemoryProperties2 as vk::PFN_vkGetPhysicalDeviceMemoryProperties2)
+        }
+        b"vkGetPhysicalDeviceQueueFamilyProperties2" | b"vkGetPhysicalDeviceQueueFamilyProperties2KHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceQueueFamilyProperties2 as vk::PFN_vkGetPhysicalDeviceQueueFamilyProperties2)
+        }
+        b"vkGetPhysicalDeviceFormatProperties2" | b"vkGetPhysicalDeviceFormatProperties2KHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceFormatProperties2 as vk::PFN_vkGetPhysicalDeviceFormatProperties2)
+        }
+        b"vkGetPhysicalDeviceImageFormatProperties2" | b"vkGetPhysicalDeviceImageFormatProperties2KHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceImageFormatProperties2 as vk::PFN_vkGetPhysicalDeviceImageFormatProperties2)
+        }
+        b"vkGetPhysicalDeviceSparseImageFormatProperties2" | b"vkGetPhysicalDeviceSparseImageFormatProperties2KHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceSparseImageFormatProperties2 as vk::PFN_vkGetPhysicalDeviceSparseImageFormatProperties2)
+        }
+        b"vkGetPhysicalDeviceExternalBufferProperties" | b"vkGetPhysicalDeviceExternalBufferPropertiesKHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceExternalBufferProperties as vk::PFN_vkGetPhysicalDeviceExternalBufferProperties)
+        }
+        b"vkGetPhysicalDeviceExternalFenceProperties" | b"vkGetPhysicalDeviceExternalFencePropertiesKHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceExternalFenceProperties as vk::PFN_vkGetPhysicalDeviceExternalFenceProperties)
+        }
+        b"vkGetPhysicalDeviceExternalSemaphoreProperties" | b"vkGetPhysicalDeviceExternalSemaphorePropertiesKHR" => {
+            std::mem::transmute(vkGetPhysicalDeviceExternalSemaphoreProperties as vk::PFN_vkGetPhysicalDeviceExternalSemaphoreProperties)
+        }
+
         _ => None,
+    };
+
+    // Log if we don't have this function
+    if result.is_none() {
+        info!("MISSING FUNCTION: {:?}", name);
     }
+
+    result
 }
 
 #[no_mangle]
@@ -502,6 +562,240 @@ pub unsafe extern "system" fn vkGetDeviceProcAddr(
             std::mem::transmute(vkAcquireNextImageKHR as vk::PFN_vkAcquireNextImageKHR)
         }
         b"vkQueuePresentKHR" => std::mem::transmute(vkQueuePresentKHR as vk::PFN_vkQueuePresentKHR),
+
+        // Command buffer management
+        b"vkFreeCommandBuffers" => {
+            std::mem::transmute(vkFreeCommandBuffers as vk::PFN_vkFreeCommandBuffers)
+        }
+        b"vkResetCommandBuffer" => {
+            std::mem::transmute(vkResetCommandBuffer as vk::PFN_vkResetCommandBuffer)
+        }
+        b"vkResetCommandPool" => {
+            std::mem::transmute(vkResetCommandPool as vk::PFN_vkResetCommandPool)
+        }
+
+        // Descriptor management
+        b"vkFreeDescriptorSets" => {
+            std::mem::transmute(vkFreeDescriptorSets as vk::PFN_vkFreeDescriptorSets)
+        }
+        b"vkResetDescriptorPool" => {
+            std::mem::transmute(vkResetDescriptorPool as vk::PFN_vkResetDescriptorPool)
+        }
+
+        // Image extras
+        b"vkGetImageSubresourceLayout" => {
+            std::mem::transmute(vkGetImageSubresourceLayout as vk::PFN_vkGetImageSubresourceLayout)
+        }
+        b"vkGetImageMemoryRequirements2" | b"vkGetImageMemoryRequirements2KHR" => {
+            std::mem::transmute(vkGetImageMemoryRequirements2 as vk::PFN_vkGetImageMemoryRequirements2)
+        }
+        b"vkBindImageMemory2" | b"vkBindImageMemory2KHR" => {
+            std::mem::transmute(vkBindImageMemory2 as vk::PFN_vkBindImageMemory2)
+        }
+        b"vkGetDeviceImageMemoryRequirements" | b"vkGetDeviceImageMemoryRequirementsKHR" => {
+            std::mem::transmute(vkGetDeviceImageMemoryRequirements as vk::PFN_vkGetDeviceImageMemoryRequirements)
+        }
+
+        // Buffer extras
+        b"vkGetBufferMemoryRequirements2" | b"vkGetBufferMemoryRequirements2KHR" => {
+            std::mem::transmute(vkGetBufferMemoryRequirements2 as vk::PFN_vkGetBufferMemoryRequirements2)
+        }
+        b"vkBindBufferMemory2" | b"vkBindBufferMemory2KHR" => {
+            std::mem::transmute(vkBindBufferMemory2 as vk::PFN_vkBindBufferMemory2)
+        }
+        b"vkGetBufferDeviceAddress" | b"vkGetBufferDeviceAddressKHR" | b"vkGetBufferDeviceAddressEXT" => {
+            std::mem::transmute(vkGetBufferDeviceAddress as vk::PFN_vkGetBufferDeviceAddress)
+        }
+        b"vkGetDeviceBufferMemoryRequirements" | b"vkGetDeviceBufferMemoryRequirementsKHR" => {
+            std::mem::transmute(vkGetDeviceBufferMemoryRequirements as vk::PFN_vkGetDeviceBufferMemoryRequirements)
+        }
+
+        // Render pass 2
+        b"vkCreateRenderPass2" | b"vkCreateRenderPass2KHR" => {
+            std::mem::transmute(vkCreateRenderPass2 as vk::PFN_vkCreateRenderPass2)
+        }
+
+        // Dynamic rendering (Vulkan 1.3 / VK_KHR_dynamic_rendering)
+        b"vkCmdBeginRendering" | b"vkCmdBeginRenderingKHR" => {
+            std::mem::transmute(vkCmdBeginRendering as vk::PFN_vkCmdBeginRendering)
+        }
+        b"vkCmdEndRendering" | b"vkCmdEndRenderingKHR" => {
+            std::mem::transmute(vkCmdEndRendering as vk::PFN_vkCmdEndRendering)
+        }
+
+        // Indirect draw
+        b"vkCmdDrawIndirect" => {
+            std::mem::transmute(vkCmdDrawIndirect as vk::PFN_vkCmdDrawIndirect)
+        }
+        b"vkCmdDrawIndexedIndirect" => {
+            std::mem::transmute(vkCmdDrawIndexedIndirect as vk::PFN_vkCmdDrawIndexedIndirect)
+        }
+
+        // Buffer fill / update
+        b"vkCmdFillBuffer" => std::mem::transmute(vkCmdFillBuffer as vk::PFN_vkCmdFillBuffer),
+        b"vkCmdUpdateBuffer" => std::mem::transmute(vkCmdUpdateBuffer as vk::PFN_vkCmdUpdateBuffer),
+
+        // Synchronization2 (VK_KHR_synchronization2 / core 1.3)
+        b"vkCmdPipelineBarrier2" | b"vkCmdPipelineBarrier2KHR" => {
+            std::mem::transmute(vkCmdPipelineBarrier2 as vk::PFN_vkCmdPipelineBarrier2)
+        }
+        b"vkQueueSubmit2" | b"vkQueueSubmit2KHR" => {
+            std::mem::transmute(vkQueueSubmit2 as vk::PFN_vkQueueSubmit2)
+        }
+
+        // Copy commands 2 (VK_KHR_copy_commands2 / core 1.3)
+        b"vkCmdCopyBuffer2" | b"vkCmdCopyBuffer2KHR" => {
+            std::mem::transmute(vkCmdCopyBuffer2 as vk::PFN_vkCmdCopyBuffer2)
+        }
+        b"vkCmdCopyImage2" | b"vkCmdCopyImage2KHR" => {
+            std::mem::transmute(vkCmdCopyImage2 as vk::PFN_vkCmdCopyImage2)
+        }
+        b"vkCmdCopyBufferToImage2" | b"vkCmdCopyBufferToImage2KHR" => {
+            std::mem::transmute(vkCmdCopyBufferToImage2 as vk::PFN_vkCmdCopyBufferToImage2)
+        }
+        b"vkCmdCopyImageToBuffer2" | b"vkCmdCopyImageToBuffer2KHR" => {
+            std::mem::transmute(vkCmdCopyImageToBuffer2 as vk::PFN_vkCmdCopyImageToBuffer2)
+        }
+        b"vkCmdBlitImage2" | b"vkCmdBlitImage2KHR" => {
+            std::mem::transmute(vkCmdBlitImage2 as vk::PFN_vkCmdBlitImage2)
+        }
+
+        // Resolve image
+        b"vkCmdResolveImage" => {
+            std::mem::transmute(vkCmdResolveImage as vk::PFN_vkCmdResolveImage)
+        }
+
+        // Extended dynamic state (VK_EXT_extended_dynamic_state / core 1.3)
+        b"vkCmdSetCullMode" | b"vkCmdSetCullModeEXT" => {
+            std::mem::transmute(vkCmdSetCullMode as vk::PFN_vkCmdSetCullMode)
+        }
+        b"vkCmdSetFrontFace" | b"vkCmdSetFrontFaceEXT" => {
+            std::mem::transmute(vkCmdSetFrontFace as vk::PFN_vkCmdSetFrontFace)
+        }
+        b"vkCmdSetPrimitiveTopology" | b"vkCmdSetPrimitiveTopologyEXT" => {
+            std::mem::transmute(vkCmdSetPrimitiveTopology as vk::PFN_vkCmdSetPrimitiveTopology)
+        }
+        b"vkCmdSetDepthTestEnable" | b"vkCmdSetDepthTestEnableEXT" => {
+            std::mem::transmute(vkCmdSetDepthTestEnable as vk::PFN_vkCmdSetDepthTestEnable)
+        }
+        b"vkCmdSetDepthWriteEnable" | b"vkCmdSetDepthWriteEnableEXT" => {
+            std::mem::transmute(vkCmdSetDepthWriteEnable as vk::PFN_vkCmdSetDepthWriteEnable)
+        }
+        b"vkCmdSetDepthCompareOp" | b"vkCmdSetDepthCompareOpEXT" => {
+            std::mem::transmute(vkCmdSetDepthCompareOp as vk::PFN_vkCmdSetDepthCompareOp)
+        }
+        b"vkCmdSetDepthBiasEnable" | b"vkCmdSetDepthBiasEnableEXT" => {
+            std::mem::transmute(vkCmdSetDepthBiasEnable as vk::PFN_vkCmdSetDepthBiasEnable)
+        }
+        b"vkCmdSetStencilTestEnable" | b"vkCmdSetStencilTestEnableEXT" => {
+            std::mem::transmute(vkCmdSetStencilTestEnable as vk::PFN_vkCmdSetStencilTestEnable)
+        }
+        b"vkCmdSetStencilOp" | b"vkCmdSetStencilOpEXT" => {
+            std::mem::transmute(vkCmdSetStencilOp as vk::PFN_vkCmdSetStencilOp)
+        }
+        b"vkCmdSetDepthBounds" => {
+            std::mem::transmute(vkCmdSetDepthBounds as vk::PFN_vkCmdSetDepthBounds)
+        }
+        b"vkCmdSetLineWidth" => {
+            std::mem::transmute(vkCmdSetLineWidth as vk::PFN_vkCmdSetLineWidth)
+        }
+        b"vkCmdSetDepthBias" => {
+            std::mem::transmute(vkCmdSetDepthBias as vk::PFN_vkCmdSetDepthBias)
+        }
+
+        // Render pass 2 commands (VK_KHR_create_renderpass2 / core 1.2)
+        b"vkCmdBeginRenderPass2" | b"vkCmdBeginRenderPass2KHR" => {
+            std::mem::transmute(vkCmdBeginRenderPass2 as vk::PFN_vkCmdBeginRenderPass2)
+        }
+        b"vkCmdNextSubpass" => {
+            std::mem::transmute(vkCmdNextSubpass as vk::PFN_vkCmdNextSubpass)
+        }
+        b"vkCmdNextSubpass2" | b"vkCmdNextSubpass2KHR" => {
+            std::mem::transmute(vkCmdNextSubpass2 as vk::PFN_vkCmdNextSubpass2)
+        }
+        b"vkCmdEndRenderPass2" | b"vkCmdEndRenderPass2KHR" => {
+            std::mem::transmute(vkCmdEndRenderPass2 as vk::PFN_vkCmdEndRenderPass2)
+        }
+
+        // Secondary command buffers
+        b"vkCmdExecuteCommands" => {
+            std::mem::transmute(vkCmdExecuteCommands as vk::PFN_vkCmdExecuteCommands)
+        }
+
+        // Dispatch base
+        b"vkCmdDispatchBase" | b"vkCmdDispatchBaseKHR" => {
+            std::mem::transmute(vkCmdDispatchBase as vk::PFN_vkCmdDispatchBase)
+        }
+
+        // Queue
+        b"vkGetDeviceQueue2" => {
+            std::mem::transmute(vkGetDeviceQueue2 as vk::PFN_vkGetDeviceQueue2)
+        }
+
+        // Fence / semaphore extras
+        b"vkGetFenceStatus" => {
+            std::mem::transmute(vkGetFenceStatus as vk::PFN_vkGetFenceStatus)
+        }
+        b"vkGetSemaphoreCounterValue" | b"vkGetSemaphoreCounterValueKHR" => {
+            std::mem::transmute(vkGetSemaphoreCounterValue as vk::PFN_vkGetSemaphoreCounterValue)
+        }
+        b"vkSignalSemaphore" | b"vkSignalSemaphoreKHR" => {
+            std::mem::transmute(vkSignalSemaphore as vk::PFN_vkSignalSemaphore)
+        }
+        b"vkWaitSemaphores" | b"vkWaitSemaphoresKHR" => {
+            std::mem::transmute(vkWaitSemaphores as vk::PFN_vkWaitSemaphores)
+        }
+
+        // Query pools
+        b"vkCreateQueryPool" => {
+            std::mem::transmute(vkCreateQueryPool as vk::PFN_vkCreateQueryPool)
+        }
+        b"vkDestroyQueryPool" => {
+            std::mem::transmute(vkDestroyQueryPool as vk::PFN_vkDestroyQueryPool)
+        }
+        b"vkGetQueryPoolResults" => {
+            std::mem::transmute(vkGetQueryPoolResults as vk::PFN_vkGetQueryPoolResults)
+        }
+        b"vkResetQueryPool" | b"vkResetQueryPoolEXT" => {
+            std::mem::transmute(vkResetQueryPool as vk::PFN_vkResetQueryPool)
+        }
+        b"vkCmdBeginQuery" => {
+            std::mem::transmute(vkCmdBeginQuery as vk::PFN_vkCmdBeginQuery)
+        }
+        b"vkCmdEndQuery" => {
+            std::mem::transmute(vkCmdEndQuery as vk::PFN_vkCmdEndQuery)
+        }
+        b"vkCmdResetQueryPool" => {
+            std::mem::transmute(vkCmdResetQueryPool as vk::PFN_vkCmdResetQueryPool)
+        }
+        b"vkCmdWriteTimestamp" => {
+            std::mem::transmute(vkCmdWriteTimestamp as vk::PFN_vkCmdWriteTimestamp)
+        }
+        b"vkCmdWriteTimestamp2" | b"vkCmdWriteTimestamp2KHR" => {
+            std::mem::transmute(vkCmdWriteTimestamp2 as vk::PFN_vkCmdWriteTimestamp2)
+        }
+        b"vkCmdCopyQueryPoolResults" => {
+            std::mem::transmute(vkCmdCopyQueryPoolResults as vk::PFN_vkCmdCopyQueryPoolResults)
+        }
+
+        // Private data (VK_EXT_private_data / core 1.3)
+        b"vkCreatePrivateDataSlot" | b"vkCreatePrivateDataSlotEXT" => {
+            std::mem::transmute(vkCreatePrivateDataSlot as vk::PFN_vkCreatePrivateDataSlot)
+        }
+        b"vkDestroyPrivateDataSlot" | b"vkDestroyPrivateDataSlotEXT" => {
+            std::mem::transmute(vkDestroyPrivateDataSlot as vk::PFN_vkDestroyPrivateDataSlot)
+        }
+        b"vkSetPrivateData" | b"vkSetPrivateDataEXT" => {
+            std::mem::transmute(vkSetPrivateData as vk::PFN_vkSetPrivateData)
+        }
+        b"vkGetPrivateData" | b"vkGetPrivateDataEXT" => {
+            std::mem::transmute(vkGetPrivateData as vk::PFN_vkGetPrivateData)
+        }
+
+        // Descriptor set layout support
+        b"vkGetDescriptorSetLayoutSupport" | b"vkGetDescriptorSetLayoutSupportKHR" => {
+            std::mem::transmute(vkGetDescriptorSetLayoutSupport as vk::PFN_vkGetDescriptorSetLayoutSupport)
+        }
 
         _ => None,
     }
@@ -1575,4 +1869,1059 @@ pub unsafe extern "system" fn vkCmdBlitImage(
         p_regions,
         filter,
     );
+}
+
+// ============================================================================
+// Physical device 2 functions (Vulkan 1.1 / KHR aliases)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceProperties2(
+    physical_device: vk::PhysicalDevice,
+    p_properties: *mut vk::PhysicalDeviceProperties2,
+) {
+    crate::instance::get_physical_device_properties2(physical_device, p_properties);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceFeatures2(
+    physical_device: vk::PhysicalDevice,
+    p_features: *mut vk::PhysicalDeviceFeatures2,
+) {
+    crate::instance::get_physical_device_features2(physical_device, p_features);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceMemoryProperties2(
+    physical_device: vk::PhysicalDevice,
+    p_memory_properties: *mut vk::PhysicalDeviceMemoryProperties2,
+) {
+    crate::instance::get_physical_device_memory_properties2(physical_device, p_memory_properties);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceQueueFamilyProperties2(
+    physical_device: vk::PhysicalDevice,
+    p_queue_family_property_count: *mut u32,
+    p_queue_family_properties: *mut vk::QueueFamilyProperties2,
+) {
+    crate::instance::get_physical_device_queue_family_properties2(
+        physical_device,
+        p_queue_family_property_count,
+        p_queue_family_properties,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceFormatProperties2(
+    physical_device: vk::PhysicalDevice,
+    format: vk::Format,
+    p_format_properties: *mut vk::FormatProperties2,
+) {
+    crate::instance::get_physical_device_format_properties2(
+        physical_device,
+        format,
+        p_format_properties,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceImageFormatProperties2(
+    physical_device: vk::PhysicalDevice,
+    p_image_format_info: *const vk::PhysicalDeviceImageFormatInfo2,
+    p_image_format_properties: *mut vk::ImageFormatProperties2,
+) -> vk::Result {
+    match crate::instance::get_physical_device_image_format_properties2(
+        physical_device,
+        p_image_format_info,
+        p_image_format_properties,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceSparseImageFormatProperties2(
+    physical_device: vk::PhysicalDevice,
+    p_format_info: *const vk::PhysicalDeviceSparseImageFormatInfo2,
+    p_property_count: *mut u32,
+    p_properties: *mut vk::SparseImageFormatProperties2,
+) {
+    crate::instance::get_physical_device_sparse_image_format_properties2(
+        physical_device,
+        p_format_info,
+        p_property_count,
+        p_properties,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceExternalBufferProperties(
+    physical_device: vk::PhysicalDevice,
+    p_external_buffer_info: *const vk::PhysicalDeviceExternalBufferInfo,
+    p_external_buffer_properties: *mut vk::ExternalBufferProperties,
+) {
+    crate::instance::get_physical_device_external_buffer_properties(
+        physical_device,
+        p_external_buffer_info,
+        p_external_buffer_properties,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceExternalFenceProperties(
+    physical_device: vk::PhysicalDevice,
+    p_external_fence_info: *const vk::PhysicalDeviceExternalFenceInfo,
+    p_external_fence_properties: *mut vk::ExternalFenceProperties,
+) {
+    crate::instance::get_physical_device_external_fence_properties(
+        physical_device,
+        p_external_fence_info,
+        p_external_fence_properties,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceExternalSemaphoreProperties(
+    physical_device: vk::PhysicalDevice,
+    p_external_semaphore_info: *const vk::PhysicalDeviceExternalSemaphoreInfo,
+    p_external_semaphore_properties: *mut vk::ExternalSemaphoreProperties,
+) {
+    crate::instance::get_physical_device_external_semaphore_properties(
+        physical_device,
+        p_external_semaphore_info,
+        p_external_semaphore_properties,
+    );
+}
+
+// Surface functions (KHR)
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCreateWin32SurfaceKHR(
+    instance: vk::Instance,
+    p_create_info: *const vk::Win32SurfaceCreateInfoKHR,
+    p_allocator: *const vk::AllocationCallbacks,
+    p_surface: *mut vk::SurfaceKHR,
+) -> vk::Result {
+    match crate::surface::create_win32_surface_khr(instance, p_create_info, p_allocator, p_surface)
+    {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkDestroySurfaceKHR(
+    instance: vk::Instance,
+    surface: vk::SurfaceKHR,
+    p_allocator: *const vk::AllocationCallbacks,
+) {
+    crate::surface::destroy_surface_khr(instance, surface, p_allocator);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceSurfaceSupportKHR(
+    physical_device: vk::PhysicalDevice,
+    queue_family_index: u32,
+    surface: vk::SurfaceKHR,
+    p_supported: *mut vk::Bool32,
+) -> vk::Result {
+    match crate::surface::get_physical_device_surface_support_khr(
+        physical_device,
+        queue_family_index,
+        surface,
+        p_supported,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+    physical_device: vk::PhysicalDevice,
+    surface: vk::SurfaceKHR,
+    p_surface_capabilities: *mut vk::SurfaceCapabilitiesKHR,
+) -> vk::Result {
+    match crate::surface::get_physical_device_surface_capabilities_khr(
+        physical_device,
+        surface,
+        p_surface_capabilities,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceSurfaceFormatsKHR(
+    physical_device: vk::PhysicalDevice,
+    surface: vk::SurfaceKHR,
+    p_surface_format_count: *mut u32,
+    p_surface_formats: *mut vk::SurfaceFormatKHR,
+) -> vk::Result {
+    match crate::surface::get_physical_device_surface_formats_khr(
+        physical_device,
+        surface,
+        p_surface_format_count,
+        p_surface_formats,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceSurfacePresentModesKHR(
+    physical_device: vk::PhysicalDevice,
+    surface: vk::SurfaceKHR,
+    p_present_mode_count: *mut u32,
+    p_present_modes: *mut vk::PresentModeKHR,
+) -> vk::Result {
+    match crate::surface::get_physical_device_surface_present_modes_khr(
+        physical_device,
+        surface,
+        p_present_mode_count,
+        p_present_modes,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+// ============================================================================
+// Command buffer management (free / reset)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkFreeCommandBuffers(
+    device: vk::Device,
+    command_pool: vk::CommandPool,
+    command_buffer_count: u32,
+    p_command_buffers: *const vk::CommandBuffer,
+) {
+    crate::command_buffer::free_command_buffers(
+        device,
+        command_pool,
+        command_buffer_count,
+        p_command_buffers,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkResetCommandBuffer(
+    command_buffer: vk::CommandBuffer,
+    flags: vk::CommandBufferResetFlags,
+) -> vk::Result {
+    match crate::command_buffer::reset_command_buffer(command_buffer, flags) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkResetCommandPool(
+    device: vk::Device,
+    command_pool: vk::CommandPool,
+    flags: vk::CommandPoolResetFlags,
+) -> vk::Result {
+    match crate::command_buffer::reset_command_pool(device, command_pool, flags) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+// ============================================================================
+// Descriptor management (free / reset)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkFreeDescriptorSets(
+    device: vk::Device,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_set_count: u32,
+    p_descriptor_sets: *const vk::DescriptorSet,
+) -> vk::Result {
+    match crate::descriptor::free_descriptor_sets(
+        device,
+        descriptor_pool,
+        descriptor_set_count,
+        p_descriptor_sets,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkResetDescriptorPool(
+    device: vk::Device,
+    descriptor_pool: vk::DescriptorPool,
+    flags: vk::DescriptorPoolResetFlags,
+) -> vk::Result {
+    match crate::descriptor::reset_descriptor_pool(device, descriptor_pool, flags) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+// ============================================================================
+// Image extras
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetImageSubresourceLayout(
+    device: vk::Device,
+    image: vk::Image,
+    p_subresource: *const vk::ImageSubresource,
+    p_layout: *mut vk::SubresourceLayout,
+) {
+    crate::image::get_image_subresource_layout(device, image, p_subresource, p_layout);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetImageMemoryRequirements2(
+    device: vk::Device,
+    p_info: *const vk::ImageMemoryRequirementsInfo2,
+    p_memory_requirements: *mut vk::MemoryRequirements2,
+) {
+    crate::image::get_image_memory_requirements2(device, p_info, p_memory_requirements);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkBindImageMemory2(
+    device: vk::Device,
+    bind_info_count: u32,
+    p_bind_infos: *const vk::BindImageMemoryInfo,
+) -> vk::Result {
+    match crate::image::bind_image_memory2(device, bind_info_count, p_bind_infos) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetDeviceImageMemoryRequirements(
+    device: vk::Device,
+    p_info: *const vk::DeviceImageMemoryRequirements,
+    p_memory_requirements: *mut vk::MemoryRequirements2,
+) {
+    crate::image::get_device_image_memory_requirements(device, p_info, p_memory_requirements);
+}
+
+// ============================================================================
+// Buffer extras
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetBufferMemoryRequirements2(
+    device: vk::Device,
+    p_info: *const vk::BufferMemoryRequirementsInfo2,
+    p_memory_requirements: *mut vk::MemoryRequirements2,
+) {
+    crate::buffer::get_buffer_memory_requirements2(device, p_info, p_memory_requirements);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkBindBufferMemory2(
+    device: vk::Device,
+    bind_info_count: u32,
+    p_bind_infos: *const vk::BindBufferMemoryInfo,
+) -> vk::Result {
+    match crate::buffer::bind_buffer_memory2(device, bind_info_count, p_bind_infos) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetBufferDeviceAddress(
+    device: vk::Device,
+    p_info: *const vk::BufferDeviceAddressInfo,
+) -> vk::DeviceAddress {
+    crate::buffer::get_buffer_device_address(device, p_info)
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetDeviceBufferMemoryRequirements(
+    device: vk::Device,
+    p_info: *const vk::DeviceBufferMemoryRequirements,
+    p_memory_requirements: *mut vk::MemoryRequirements2,
+) {
+    crate::buffer::get_device_buffer_memory_requirements(device, p_info, p_memory_requirements);
+}
+
+// ============================================================================
+// Render pass 2
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCreateRenderPass2(
+    device: vk::Device,
+    p_create_info: *const vk::RenderPassCreateInfo2,
+    p_allocator: *const vk::AllocationCallbacks,
+    p_render_pass: *mut vk::RenderPass,
+) -> vk::Result {
+    match crate::render_pass::create_render_pass2(device, p_create_info, p_allocator, p_render_pass)
+    {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+// ============================================================================
+// Dynamic rendering (VK_KHR_dynamic_rendering / core 1.3)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdBeginRendering(
+    command_buffer: vk::CommandBuffer,
+    p_rendering_info: *const vk::RenderingInfo,
+) {
+    crate::command_buffer::cmd_begin_rendering(command_buffer, p_rendering_info);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdEndRendering(command_buffer: vk::CommandBuffer) {
+    crate::command_buffer::cmd_end_rendering(command_buffer);
+}
+
+// ============================================================================
+// Indirect draw
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdDrawIndirect(
+    command_buffer: vk::CommandBuffer,
+    buffer: vk::Buffer,
+    offset: vk::DeviceSize,
+    draw_count: u32,
+    stride: u32,
+) {
+    crate::command_buffer::cmd_draw_indirect(command_buffer, buffer, offset, draw_count, stride);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdDrawIndexedIndirect(
+    command_buffer: vk::CommandBuffer,
+    buffer: vk::Buffer,
+    offset: vk::DeviceSize,
+    draw_count: u32,
+    stride: u32,
+) {
+    crate::command_buffer::cmd_draw_indexed_indirect(
+        command_buffer,
+        buffer,
+        offset,
+        draw_count,
+        stride,
+    );
+}
+
+// ============================================================================
+// Buffer fill / update
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdFillBuffer(
+    command_buffer: vk::CommandBuffer,
+    dst_buffer: vk::Buffer,
+    dst_offset: vk::DeviceSize,
+    size: vk::DeviceSize,
+    data: u32,
+) {
+    crate::command_buffer::cmd_fill_buffer(command_buffer, dst_buffer, dst_offset, size, data);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdUpdateBuffer(
+    command_buffer: vk::CommandBuffer,
+    dst_buffer: vk::Buffer,
+    dst_offset: vk::DeviceSize,
+    data_size: vk::DeviceSize,
+    p_data: *const std::ffi::c_void,
+) {
+    crate::command_buffer::cmd_update_buffer(
+        command_buffer,
+        dst_buffer,
+        dst_offset,
+        data_size,
+        p_data,
+    );
+}
+
+// ============================================================================
+// Synchronization 2 (VK_KHR_synchronization2 / core 1.3)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdPipelineBarrier2(
+    command_buffer: vk::CommandBuffer,
+    p_dependency_info: *const vk::DependencyInfo,
+) {
+    crate::command_buffer::cmd_pipeline_barrier2(command_buffer, p_dependency_info);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkQueueSubmit2(
+    queue: vk::Queue,
+    submit_count: u32,
+    p_submits: *const vk::SubmitInfo2,
+    fence: vk::Fence,
+) -> vk::Result {
+    match crate::queue::queue_submit2(queue, submit_count, p_submits, fence) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+// ============================================================================
+// Copy commands 2 (VK_KHR_copy_commands2 / core 1.3)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdCopyBuffer2(
+    command_buffer: vk::CommandBuffer,
+    p_copy_buffer_info: *const vk::CopyBufferInfo2,
+) {
+    crate::command_buffer::cmd_copy_buffer2(command_buffer, p_copy_buffer_info);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdCopyImage2(
+    command_buffer: vk::CommandBuffer,
+    p_copy_image_info: *const vk::CopyImageInfo2,
+) {
+    crate::command_buffer::cmd_copy_image2(command_buffer, p_copy_image_info);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdCopyBufferToImage2(
+    command_buffer: vk::CommandBuffer,
+    p_copy_buffer_to_image_info: *const vk::CopyBufferToImageInfo2,
+) {
+    crate::command_buffer::cmd_copy_buffer_to_image2(
+        command_buffer,
+        p_copy_buffer_to_image_info,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdCopyImageToBuffer2(
+    command_buffer: vk::CommandBuffer,
+    p_copy_image_to_buffer_info: *const vk::CopyImageToBufferInfo2,
+) {
+    crate::command_buffer::cmd_copy_image_to_buffer2(
+        command_buffer,
+        p_copy_image_to_buffer_info,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdBlitImage2(
+    command_buffer: vk::CommandBuffer,
+    p_blit_image_info: *const vk::BlitImageInfo2,
+) {
+    crate::command_buffer::cmd_blit_image2(command_buffer, p_blit_image_info);
+}
+
+// ============================================================================
+// Resolve image
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdResolveImage(
+    command_buffer: vk::CommandBuffer,
+    src_image: vk::Image,
+    src_image_layout: vk::ImageLayout,
+    dst_image: vk::Image,
+    dst_image_layout: vk::ImageLayout,
+    region_count: u32,
+    p_regions: *const vk::ImageResolve,
+) {
+    crate::command_buffer::cmd_resolve_image(
+        command_buffer,
+        src_image,
+        src_image_layout,
+        dst_image,
+        dst_image_layout,
+        region_count,
+        p_regions,
+    );
+}
+
+// ============================================================================
+// Extended dynamic state (VK_EXT_extended_dynamic_state / core 1.3)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetCullMode(
+    command_buffer: vk::CommandBuffer,
+    cull_mode: vk::CullModeFlags,
+) {
+    crate::command_buffer::cmd_set_cull_mode(command_buffer, cull_mode);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetFrontFace(
+    command_buffer: vk::CommandBuffer,
+    front_face: vk::FrontFace,
+) {
+    crate::command_buffer::cmd_set_front_face(command_buffer, front_face);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetPrimitiveTopology(
+    command_buffer: vk::CommandBuffer,
+    primitive_topology: vk::PrimitiveTopology,
+) {
+    crate::command_buffer::cmd_set_primitive_topology(command_buffer, primitive_topology);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetDepthTestEnable(
+    command_buffer: vk::CommandBuffer,
+    depth_test_enable: vk::Bool32,
+) {
+    crate::command_buffer::cmd_set_depth_test_enable(command_buffer, depth_test_enable);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetDepthWriteEnable(
+    command_buffer: vk::CommandBuffer,
+    depth_write_enable: vk::Bool32,
+) {
+    crate::command_buffer::cmd_set_depth_write_enable(command_buffer, depth_write_enable);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetDepthCompareOp(
+    command_buffer: vk::CommandBuffer,
+    depth_compare_op: vk::CompareOp,
+) {
+    crate::command_buffer::cmd_set_depth_compare_op(command_buffer, depth_compare_op);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetDepthBiasEnable(
+    command_buffer: vk::CommandBuffer,
+    depth_bias_enable: vk::Bool32,
+) {
+    crate::command_buffer::cmd_set_depth_bias_enable(command_buffer, depth_bias_enable);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetStencilTestEnable(
+    command_buffer: vk::CommandBuffer,
+    stencil_test_enable: vk::Bool32,
+) {
+    crate::command_buffer::cmd_set_stencil_test_enable(command_buffer, stencil_test_enable);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetStencilOp(
+    command_buffer: vk::CommandBuffer,
+    face_mask: vk::StencilFaceFlags,
+    fail_op: vk::StencilOp,
+    pass_op: vk::StencilOp,
+    depth_fail_op: vk::StencilOp,
+    compare_op: vk::CompareOp,
+) {
+    crate::command_buffer::cmd_set_stencil_op(
+        command_buffer,
+        face_mask,
+        fail_op,
+        pass_op,
+        depth_fail_op,
+        compare_op,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetDepthBounds(
+    command_buffer: vk::CommandBuffer,
+    min_depth_bounds: f32,
+    max_depth_bounds: f32,
+) {
+    crate::command_buffer::cmd_set_depth_bounds(
+        command_buffer,
+        min_depth_bounds,
+        max_depth_bounds,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetLineWidth(
+    command_buffer: vk::CommandBuffer,
+    line_width: f32,
+) {
+    crate::command_buffer::cmd_set_line_width(command_buffer, line_width);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetDepthBias(
+    command_buffer: vk::CommandBuffer,
+    depth_bias_constant_factor: f32,
+    depth_bias_clamp: f32,
+    depth_bias_slope_factor: f32,
+) {
+    crate::command_buffer::cmd_set_depth_bias(
+        command_buffer,
+        depth_bias_constant_factor,
+        depth_bias_clamp,
+        depth_bias_slope_factor,
+    );
+}
+
+// ============================================================================
+// Render pass 2 commands (VK_KHR_create_renderpass2 / core 1.2)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdBeginRenderPass2(
+    command_buffer: vk::CommandBuffer,
+    p_render_pass_begin: *const vk::RenderPassBeginInfo,
+    p_subpass_begin_info: *const vk::SubpassBeginInfo,
+) {
+    crate::command_buffer::cmd_begin_render_pass2(
+        command_buffer,
+        p_render_pass_begin,
+        p_subpass_begin_info,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdNextSubpass(
+    command_buffer: vk::CommandBuffer,
+    contents: vk::SubpassContents,
+) {
+    crate::command_buffer::cmd_next_subpass(command_buffer, contents);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdNextSubpass2(
+    command_buffer: vk::CommandBuffer,
+    p_subpass_begin_info: *const vk::SubpassBeginInfo,
+    p_subpass_end_info: *const vk::SubpassEndInfo,
+) {
+    crate::command_buffer::cmd_next_subpass2(
+        command_buffer,
+        p_subpass_begin_info,
+        p_subpass_end_info,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdEndRenderPass2(
+    command_buffer: vk::CommandBuffer,
+    p_subpass_end_info: *const vk::SubpassEndInfo,
+) {
+    crate::command_buffer::cmd_end_render_pass2(command_buffer, p_subpass_end_info);
+}
+
+// ============================================================================
+// Secondary command buffers
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdExecuteCommands(
+    command_buffer: vk::CommandBuffer,
+    command_buffer_count: u32,
+    p_command_buffers: *const vk::CommandBuffer,
+) {
+    crate::command_buffer::cmd_execute_commands(
+        command_buffer,
+        command_buffer_count,
+        p_command_buffers,
+    );
+}
+
+// ============================================================================
+// Dispatch base
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdDispatchBase(
+    command_buffer: vk::CommandBuffer,
+    base_group_x: u32,
+    base_group_y: u32,
+    base_group_z: u32,
+    group_count_x: u32,
+    group_count_y: u32,
+    group_count_z: u32,
+) {
+    crate::command_buffer::cmd_dispatch_base(
+        command_buffer,
+        base_group_x,
+        base_group_y,
+        base_group_z,
+        group_count_x,
+        group_count_y,
+        group_count_z,
+    );
+}
+
+// ============================================================================
+// Queue extras
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetDeviceQueue2(
+    device: vk::Device,
+    p_queue_info: *const vk::DeviceQueueInfo2,
+    p_queue: *mut vk::Queue,
+) {
+    crate::queue::get_device_queue2(device, p_queue_info, p_queue);
+}
+
+// ============================================================================
+// Fence / semaphore extras
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetFenceStatus(
+    device: vk::Device,
+    fence: vk::Fence,
+) -> vk::Result {
+    match crate::sync::get_fence_status(device, fence) {
+        Ok(r) => r,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetSemaphoreCounterValue(
+    device: vk::Device,
+    semaphore: vk::Semaphore,
+    p_value: *mut u64,
+) -> vk::Result {
+    match crate::sync::get_semaphore_counter_value(device, semaphore, p_value) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkSignalSemaphore(
+    device: vk::Device,
+    p_signal_info: *const vk::SemaphoreSignalInfo,
+) -> vk::Result {
+    match crate::sync::signal_semaphore(device, p_signal_info) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkWaitSemaphores(
+    device: vk::Device,
+    p_wait_info: *const vk::SemaphoreWaitInfo,
+    timeout: u64,
+) -> vk::Result {
+    match crate::sync::wait_semaphores(device, p_wait_info, timeout) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+// ============================================================================
+// Query pools
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCreateQueryPool(
+    device: vk::Device,
+    p_create_info: *const vk::QueryPoolCreateInfo,
+    p_allocator: *const vk::AllocationCallbacks,
+    p_query_pool: *mut vk::QueryPool,
+) -> vk::Result {
+    match crate::query::create_query_pool(device, p_create_info, p_allocator, p_query_pool) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkDestroyQueryPool(
+    device: vk::Device,
+    query_pool: vk::QueryPool,
+    p_allocator: *const vk::AllocationCallbacks,
+) {
+    crate::query::destroy_query_pool(device, query_pool, p_allocator);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetQueryPoolResults(
+    device: vk::Device,
+    query_pool: vk::QueryPool,
+    first_query: u32,
+    query_count: u32,
+    data_size: usize,
+    p_data: *mut std::ffi::c_void,
+    stride: vk::DeviceSize,
+    flags: vk::QueryResultFlags,
+) -> vk::Result {
+    crate::query::get_query_pool_results(
+        device,
+        query_pool,
+        first_query,
+        query_count,
+        data_size,
+        p_data,
+        stride,
+        flags,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkResetQueryPool(
+    device: vk::Device,
+    query_pool: vk::QueryPool,
+    first_query: u32,
+    query_count: u32,
+) {
+    crate::query::reset_query_pool(device, query_pool, first_query, query_count);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdBeginQuery(
+    command_buffer: vk::CommandBuffer,
+    query_pool: vk::QueryPool,
+    query: u32,
+    flags: vk::QueryControlFlags,
+) {
+    // Record for completeness; no-op in replay since WebGPU doesn't expose occlusion queries.
+    let _ = (command_buffer, query_pool, query, flags);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdEndQuery(
+    command_buffer: vk::CommandBuffer,
+    query_pool: vk::QueryPool,
+    query: u32,
+) {
+    let _ = (command_buffer, query_pool, query);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdResetQueryPool(
+    command_buffer: vk::CommandBuffer,
+    query_pool: vk::QueryPool,
+    first_query: u32,
+    query_count: u32,
+) {
+    let _ = (command_buffer, query_pool, first_query, query_count);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdWriteTimestamp(
+    command_buffer: vk::CommandBuffer,
+    pipeline_stage: vk::PipelineStageFlags,
+    query_pool: vk::QueryPool,
+    query: u32,
+) {
+    let _ = (command_buffer, pipeline_stage, query_pool, query);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdWriteTimestamp2(
+    command_buffer: vk::CommandBuffer,
+    stage: vk::PipelineStageFlags2,
+    query_pool: vk::QueryPool,
+    query: u32,
+) {
+    let _ = (command_buffer, stage, query_pool, query);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdCopyQueryPoolResults(
+    command_buffer: vk::CommandBuffer,
+    query_pool: vk::QueryPool,
+    first_query: u32,
+    query_count: u32,
+    dst_buffer: vk::Buffer,
+    dst_offset: vk::DeviceSize,
+    stride: vk::DeviceSize,
+    flags: vk::QueryResultFlags,
+) {
+    let _ = (
+        command_buffer,
+        query_pool,
+        first_query,
+        query_count,
+        dst_buffer,
+        dst_offset,
+        stride,
+        flags,
+    );
+}
+
+// ============================================================================
+// Private data (VK_EXT_private_data / core 1.3)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCreatePrivateDataSlot(
+    device: vk::Device,
+    p_create_info: *const vk::PrivateDataSlotCreateInfo,
+    p_allocator: *const vk::AllocationCallbacks,
+    p_private_data_slot: *mut vk::PrivateDataSlot,
+) -> vk::Result {
+    match crate::device::create_private_data_slot(
+        device,
+        p_create_info,
+        p_allocator,
+        p_private_data_slot,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkDestroyPrivateDataSlot(
+    device: vk::Device,
+    private_data_slot: vk::PrivateDataSlot,
+    p_allocator: *const vk::AllocationCallbacks,
+) {
+    crate::device::destroy_private_data_slot(device, private_data_slot, p_allocator);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkSetPrivateData(
+    device: vk::Device,
+    object_type: vk::ObjectType,
+    object_handle: u64,
+    private_data_slot: vk::PrivateDataSlot,
+    data: u64,
+) -> vk::Result {
+    match crate::device::set_private_data(device, object_type, object_handle, private_data_slot, data) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPrivateData(
+    device: vk::Device,
+    object_type: vk::ObjectType,
+    object_handle: u64,
+    private_data_slot: vk::PrivateDataSlot,
+    p_data: *mut u64,
+) {
+    crate::device::get_private_data(device, object_type, object_handle, private_data_slot, p_data);
+}
+
+// ============================================================================
+// Descriptor set layout support
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetDescriptorSetLayoutSupport(
+    device: vk::Device,
+    p_create_info: *const vk::DescriptorSetLayoutCreateInfo,
+    p_support: *mut vk::DescriptorSetLayoutSupport,
+) {
+    crate::device::get_descriptor_set_layout_support(device, p_create_info, p_support);
 }

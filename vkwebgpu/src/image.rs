@@ -353,3 +353,115 @@ pub fn get_image_data(image: vk::Image) -> Option<Arc<VkImageData>> {
 pub fn get_image_view_data(image_view: vk::ImageView) -> Option<Arc<VkImageViewData>> {
     IMAGE_VIEW_ALLOCATOR.get(image_view.as_raw())
 }
+
+pub unsafe fn get_image_subresource_layout(
+    _device: vk::Device,
+    image: vk::Image,
+    p_subresource: *const vk::ImageSubresource,
+    p_layout: *mut vk::SubresourceLayout,
+) {
+    let img_data = match IMAGE_ALLOCATOR.get(image.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    let subresource = &*p_subresource;
+    let layout = &mut *p_layout;
+
+    let bytes_per_pixel = format::format_size(img_data.format).unwrap_or(4) as u64;
+
+    // Compute mip-level dimensions
+    let mip = subresource.mip_level;
+    let width = ((img_data.extent.width >> mip).max(1)) as u64;
+    let height = ((img_data.extent.height >> mip).max(1)) as u64;
+    let depth = ((img_data.extent.depth >> mip).max(1)) as u64;
+
+    // Align row pitch to 256 bytes (WebGPU requirement for linear textures)
+    let row_pitch = ((width * bytes_per_pixel) + 255) & !255;
+    let array_pitch = row_pitch * height;
+    let depth_pitch = array_pitch;
+
+    // Compute offset by summing previous layers and mips
+    let mut offset: u64 = 0;
+    for _layer in 0..subresource.array_layer {
+        for m in 0..img_data.mip_levels {
+            let mw = ((img_data.extent.width >> m).max(1)) as u64;
+            let mh = ((img_data.extent.height >> m).max(1)) as u64;
+            let md = ((img_data.extent.depth >> m).max(1)) as u64;
+            let mrp = ((mw * bytes_per_pixel) + 255) & !255;
+            offset += mrp * mh * md;
+        }
+    }
+    for m in 0..mip {
+        let mw = ((img_data.extent.width >> m).max(1)) as u64;
+        let mh = ((img_data.extent.height >> m).max(1)) as u64;
+        let md = ((img_data.extent.depth >> m).max(1)) as u64;
+        let mrp = ((mw * bytes_per_pixel) + 255) & !255;
+        offset += mrp * mh * md;
+    }
+
+    layout.offset = offset;
+    layout.size = row_pitch * height * depth;
+    layout.row_pitch = row_pitch;
+    layout.array_pitch = array_pitch;
+    layout.depth_pitch = depth_pitch;
+}
+
+pub unsafe fn get_image_memory_requirements2(
+    device: vk::Device,
+    p_info: *const vk::ImageMemoryRequirementsInfo2,
+    p_memory_requirements: *mut vk::MemoryRequirements2,
+) {
+    let info = &*p_info;
+    get_image_memory_requirements(
+        device,
+        info.image,
+        &mut (*p_memory_requirements).memory_requirements,
+    );
+}
+
+pub unsafe fn bind_image_memory2(
+    device: vk::Device,
+    bind_info_count: u32,
+    p_bind_infos: *const vk::BindImageMemoryInfo,
+) -> Result<()> {
+    if bind_info_count == 0 || p_bind_infos.is_null() {
+        return Ok(());
+    }
+    let infos = std::slice::from_raw_parts(p_bind_infos, bind_info_count as usize);
+    for info in infos {
+        bind_image_memory(device, info.image, info.memory, info.memory_offset)?;
+    }
+    Ok(())
+}
+
+pub unsafe fn get_device_image_memory_requirements(
+    _device: vk::Device,
+    p_info: *const vk::DeviceImageMemoryRequirements,
+    p_memory_requirements: *mut vk::MemoryRequirements2,
+) {
+    let info = &*p_info;
+    if info.p_create_info.is_null() {
+        return;
+    }
+    let create_info = &*info.p_create_info;
+
+    let bytes_per_pixel = format::format_size(create_info.format).unwrap_or(4) as u64;
+    let width = create_info.extent.width as u64;
+    let height = create_info.extent.height as u64;
+    let depth = create_info.extent.depth as u64;
+
+    let mut total_size: u64 = 0;
+    for m in 0..create_info.mip_levels {
+        let mw = (width >> m).max(1);
+        let mh = (height >> m).max(1);
+        let md = (depth >> m).max(1);
+        let row_pitch = ((mw * bytes_per_pixel) + 255) & !255;
+        total_size += row_pitch * mh * md * create_info.array_layers as u64;
+    }
+
+    let reqs = &mut (*p_memory_requirements).memory_requirements;
+    reqs.size = total_size.max(4096);
+    reqs.alignment = 256;
+    reqs.memory_type_bits = 0b111;
+}

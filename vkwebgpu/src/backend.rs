@@ -95,14 +95,15 @@ impl WebGPUBackend {
         
         // CRITICAL: Exclude Vulkan backend to prevent infinite recursion!
         // Our ICD translates Vulkan->WebGPU, so wgpu must use native backends (DX12, Metal, etc.)
+        // Note: GL backend can hang when called from within GL context, so only use DX12/Metal
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12 | wgpu::Backends::METAL | wgpu::Backends::GL,
+            backends: wgpu::Backends::DX12 | wgpu::Backends::METAL,
             ..Default::default()
         });
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
+            power_preference: wgpu::PowerPreference::LowPower, // Try low power first
+            force_fallback_adapter: true, // Force WARP software renderer
             compatible_surface: None,
         }))
         .ok_or(VkError::AdapterNotAvailable)?;
@@ -147,14 +148,14 @@ impl WebGPUBackend {
             &wgpu::DeviceDescriptor {
                 label: Some("VkWebGPU Device"),
                 required_features,
-                required_limits: wgpu::Limits {
-                    max_push_constant_size,
-                    ..Default::default()
-                },
+                required_limits: wgpu::Limits::downlevel_defaults(), // Use minimal limits for compatibility
             },
             None,
         ))
-        .map_err(|e| VkError::DeviceCreationFailed(e.to_string()))?;
+        .map_err(|e| {
+            info!("Device creation error: {}", e);
+            VkError::DeviceCreationFailed(e.to_string())
+        })?;
 
         info!("WebGPU device created successfully");
 

@@ -198,6 +198,47 @@ pub unsafe fn destroy_descriptor_pool(
     debug!("Destroyed descriptor pool");
 }
 
+pub unsafe fn free_descriptor_sets(
+    _device: vk::Device,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_set_count: u32,
+    p_descriptor_sets: *const vk::DescriptorSet,
+) -> Result<()> {
+    if descriptor_set_count == 0 || p_descriptor_sets.is_null() {
+        return Ok(());
+    }
+    let sets = std::slice::from_raw_parts(p_descriptor_sets, descriptor_set_count as usize);
+
+    if let Some(pool_data) = DESCRIPTOR_POOL_ALLOCATOR.get(descriptor_pool.as_raw()) {
+        let mut allocated = pool_data.allocated_sets.write();
+        for &set in sets {
+            if set != vk::DescriptorSet::null() {
+                DESCRIPTOR_SET_ALLOCATOR.remove(set.as_raw());
+                allocated.retain(|&s| s != set);
+            }
+        }
+    }
+
+    debug!("Freed {} descriptor sets", descriptor_set_count);
+    Ok(())
+}
+
+pub unsafe fn reset_descriptor_pool(
+    _device: vk::Device,
+    descriptor_pool: vk::DescriptorPool,
+    _flags: vk::DescriptorPoolResetFlags,
+) -> Result<()> {
+    if let Some(pool_data) = DESCRIPTOR_POOL_ALLOCATOR.get(descriptor_pool.as_raw()) {
+        let sets = pool_data.allocated_sets.read().clone();
+        for set in sets {
+            DESCRIPTOR_SET_ALLOCATOR.remove(set.as_raw());
+        }
+        pool_data.allocated_sets.write().clear();
+    }
+    debug!("Reset descriptor pool");
+    Ok(())
+}
+
 pub unsafe fn allocate_descriptor_sets(
     device: vk::Device,
     p_allocate_info: *const vk::DescriptorSetAllocateInfo,

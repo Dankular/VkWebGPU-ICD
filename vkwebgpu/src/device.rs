@@ -9,6 +9,8 @@ use parking_lot::RwLock;
 use std::ffi::CStr;
 use std::sync::Arc;
 
+use std::collections::HashMap;
+
 use crate::backend::WebGPUBackend;
 use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
@@ -112,6 +114,83 @@ pub unsafe fn create_device(
     Ok(())
 }
 
+// ===========================================================================
+// VK_EXT_private_data
+// ===========================================================================
+
+/// Global private-data store: (object_handle, slot_handle) → u64
+static PRIVATE_DATA: Lazy<RwLock<HashMap<(u64, u64), u64>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Counter for private data slot handles
+static PRIVATE_DATA_SLOT_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+pub unsafe fn create_private_data_slot(
+    _device: vk::Device,
+    _p_create_info: *const vk::PrivateDataSlotCreateInfo,
+    _p_allocator: *const vk::AllocationCallbacks,
+    p_private_data_slot: *mut vk::PrivateDataSlot,
+) -> Result<()> {
+    let handle = PRIVATE_DATA_SLOT_COUNTER
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    *p_private_data_slot = Handle::from_raw(handle);
+    Ok(())
+}
+
+pub unsafe fn destroy_private_data_slot(
+    _device: vk::Device,
+    private_data_slot: vk::PrivateDataSlot,
+    _p_allocator: *const vk::AllocationCallbacks,
+) {
+    if private_data_slot == vk::PrivateDataSlot::null() {
+        return;
+    }
+    // Remove all entries for this slot
+    let slot_raw = private_data_slot.as_raw();
+    PRIVATE_DATA.write().retain(|k, _| k.1 != slot_raw);
+}
+
+pub unsafe fn set_private_data(
+    _device: vk::Device,
+    _object_type: vk::ObjectType,
+    object_handle: u64,
+    private_data_slot: vk::PrivateDataSlot,
+    data: u64,
+) -> Result<()> {
+    PRIVATE_DATA
+        .write()
+        .insert((object_handle, private_data_slot.as_raw()), data);
+    Ok(())
+}
+
+pub unsafe fn get_private_data(
+    _device: vk::Device,
+    _object_type: vk::ObjectType,
+    object_handle: u64,
+    private_data_slot: vk::PrivateDataSlot,
+    p_data: *mut u64,
+) {
+    let val = PRIVATE_DATA
+        .read()
+        .get(&(object_handle, private_data_slot.as_raw()))
+        .copied()
+        .unwrap_or(0);
+    *p_data = val;
+}
+
+/// vkGetDescriptorSetLayoutSupport / vkGetDescriptorSetLayoutSupportKHR
+/// We always report the layout as supported.
+pub unsafe fn get_descriptor_set_layout_support(
+    _device: vk::Device,
+    _p_create_info: *const vk::DescriptorSetLayoutCreateInfo,
+    p_support: *mut vk::DescriptorSetLayoutSupport,
+) {
+    if !p_support.is_null() {
+        (*p_support).supported = vk::TRUE;
+    }
+}
+
 pub unsafe fn destroy_device(device: vk::Device, _p_allocator: *const vk::AllocationCallbacks) {
     let device_handle = device.as_raw();
     if let Some(device_data) = DEVICE_ALLOCATOR.get(device_handle) {
@@ -152,14 +231,48 @@ pub unsafe fn enumerate_device_extension_properties(
 ) -> Result<()> {
     // Extensions our device/ICD supports
     const DEVICE_EXTENSIONS: &[(&str, u32)] = &[
-        ("VK_KHR_swapchain", 70),   // Swapchain support
-        ("VK_KHR_maintenance1", 2), // DXVK uses this
+        // Swapchain
+        ("VK_KHR_swapchain", 70),
+        // Maintenance
+        ("VK_KHR_maintenance1", 2),
         ("VK_KHR_maintenance2", 1),
         ("VK_KHR_maintenance3", 1),
+        ("VK_KHR_maintenance4", 2),
+        // Memory
         ("VK_KHR_dedicated_allocation", 3),
         ("VK_KHR_get_memory_requirements2", 1),
-        ("VK_EXT_descriptor_indexing", 2), // DXVK may need this
         ("VK_KHR_bind_memory2", 1),
+        // Descriptors
+        ("VK_EXT_descriptor_indexing", 2),
+        ("VK_EXT_scalar_block_layout", 1),
+        // Rendering / render pass
+        ("VK_KHR_dynamic_rendering", 1),
+        ("VK_KHR_create_renderpass2", 1),
+        ("VK_KHR_imageless_framebuffer", 1),
+        // Synchronization
+        ("VK_KHR_synchronization2", 1),
+        ("VK_KHR_timeline_semaphore", 2),
+        // Shader features
+        ("VK_KHR_shader_draw_parameters", 1),
+        ("VK_KHR_separate_depth_stencil_layouts", 1),
+        ("VK_KHR_uniform_buffer_standard_layout", 1),
+        ("VK_KHR_buffer_device_address", 1),
+        // Extended dynamic state
+        ("VK_EXT_extended_dynamic_state", 1),
+        ("VK_EXT_extended_dynamic_state2", 1),
+        ("VK_EXT_depth_clip_enable", 1),
+        // Misc
+        ("VK_EXT_host_query_reset", 1),
+        ("VK_KHR_image_format_list", 1),
+        ("VK_KHR_copy_commands2", 1),
+        ("VK_KHR_format_feature_flags2", 1),
+        ("VK_EXT_private_data", 1),
+        ("VK_KHR_pipeline_library", 1),
+        ("VK_KHR_driver_properties", 1),
+        ("VK_KHR_depth_stencil_resolve", 1),
+        ("VK_EXT_sampler_filter_minmax", 2),
+        ("VK_KHR_multiview", 1),
+        ("VK_KHR_device_group", 3),
     ];
 
     if p_properties.is_null() {

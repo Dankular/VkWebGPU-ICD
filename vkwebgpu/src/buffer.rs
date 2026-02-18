@@ -177,3 +177,61 @@ fn vk_to_wgpu_buffer_usage(vk_usage: vk::BufferUsageFlags) -> wgpu::BufferUsages
 pub fn get_buffer_data(buffer: vk::Buffer) -> Option<Arc<VkBufferData>> {
     BUFFER_ALLOCATOR.get(buffer.as_raw())
 }
+
+pub unsafe fn get_buffer_memory_requirements2(
+    device: vk::Device,
+    p_info: *const vk::BufferMemoryRequirementsInfo2,
+    p_memory_requirements: *mut vk::MemoryRequirements2,
+) {
+    let info = &*p_info;
+    get_buffer_memory_requirements(
+        device,
+        info.buffer,
+        &mut (*p_memory_requirements).memory_requirements,
+    );
+}
+
+pub unsafe fn bind_buffer_memory2(
+    device: vk::Device,
+    bind_info_count: u32,
+    p_bind_infos: *const vk::BindBufferMemoryInfo,
+) -> Result<()> {
+    if bind_info_count == 0 || p_bind_infos.is_null() {
+        return Ok(());
+    }
+    let infos = std::slice::from_raw_parts(p_bind_infos, bind_info_count as usize);
+    for info in infos {
+        bind_buffer_memory(device, info.buffer, info.memory, info.memory_offset)?;
+    }
+    Ok(())
+}
+
+pub unsafe fn get_buffer_device_address(
+    _device: vk::Device,
+    p_info: *const vk::BufferDeviceAddressInfo,
+) -> vk::DeviceAddress {
+    if p_info.is_null() {
+        return 0;
+    }
+    let info = &*p_info;
+    // Return the handle raw value as a fake device address.
+    // This is a stub - real buffer device address requires GPU VA space management.
+    // The value is non-zero and unique per buffer, which is enough to not crash.
+    info.buffer.as_raw()
+}
+
+pub unsafe fn get_device_buffer_memory_requirements(
+    _device: vk::Device,
+    p_info: *const vk::DeviceBufferMemoryRequirements,
+    p_memory_requirements: *mut vk::MemoryRequirements2,
+) {
+    if p_info.is_null() || (*p_info).p_create_info.is_null() {
+        return;
+    }
+    let create_info = &*(*p_info).p_create_info;
+
+    let reqs = &mut (*p_memory_requirements).memory_requirements;
+    reqs.size = create_info.size;
+    reqs.alignment = 256;
+    reqs.memory_type_bits = 0b111;
+}
