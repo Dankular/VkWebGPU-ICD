@@ -122,8 +122,18 @@ pub unsafe fn create_pipeline_layout(
             .filter_map(|&layout| crate::descriptor::get_descriptor_set_layout_data(layout))
             .collect();
 
-        let bind_group_layouts: Vec<&wgpu::BindGroupLayout> =
+        let mut bind_group_layouts: Vec<&wgpu::BindGroupLayout> =
             layout_datas.iter().map(|data| &*data.wgpu_layout).collect();
+
+        // If this pipeline layout has push constants, prepend the push constant bind group layout
+        // at set 0. This shifts all user descriptor sets by +1.
+        // TODO: This is a simplification - ideally we should only add this to pipelines that
+        // actually use push constants, but for DXVK compatibility we add it to all layouts.
+        let has_push_constants = !push_constant_ranges.is_empty();
+        if has_push_constants {
+            // Insert push constant bind group layout at index 0
+            bind_group_layouts.insert(0, device_data.push_constant_buffer.bind_group_layout());
+        }
 
         device_data
             .backend

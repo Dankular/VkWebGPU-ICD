@@ -13,6 +13,7 @@ use crate::backend::WebGPUBackend;
 use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
 use crate::instance;
+use crate::push_constants::PushConstantRingBuffer;
 use crate::shader::ShaderCache;
 
 /// Global device allocator
@@ -27,6 +28,7 @@ pub struct VkDeviceData {
     pub queues: RwLock<Vec<vk::Queue>>,
     pub backend: Arc<WebGPUBackend>,
     pub shader_cache: ShaderCache,
+    pub push_constant_buffer: Arc<PushConstantRingBuffer>,
 }
 
 pub unsafe fn create_device(
@@ -87,6 +89,12 @@ pub unsafe fn create_device(
         }
     };
 
+    // Initialize push constant ring buffer for DXVK compatibility
+    let push_constant_buffer = Arc::new(PushConstantRingBuffer::new(
+        &backend.device,
+        PushConstantRingBuffer::DEFAULT_CAPACITY,
+    ));
+
     let device_data = VkDeviceData {
         physical_device,
         enabled_features,
@@ -94,6 +102,7 @@ pub unsafe fn create_device(
         queues: RwLock::new(Vec::new()),
         backend,
         shader_cache: ShaderCache::new(),
+        push_constant_buffer,
     };
 
     let device_handle = DEVICE_ALLOCATOR.allocate(device_data);

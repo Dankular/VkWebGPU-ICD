@@ -66,6 +66,13 @@ pub enum RecordedCommand {
         descriptor_sets: Vec<vk::DescriptorSet>,
         dynamic_offsets: Vec<u32>,
     },
+    PushConstants {
+        layout: vk::PipelineLayout,
+        stage_flags: vk::ShaderStageFlags,
+        offset: u32,
+        size: u32,
+        data: Vec<u8>,
+    },
     Draw {
         vertex_count: u32,
         instance_count: u32,
@@ -516,6 +523,44 @@ pub unsafe fn cmd_dispatch(
     });
 }
 
+pub unsafe fn cmd_push_constants(
+    command_buffer: vk::CommandBuffer,
+    layout: vk::PipelineLayout,
+    stage_flags: vk::ShaderStageFlags,
+    offset: u32,
+    size: u32,
+    p_values: *const std::ffi::c_void,
+) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!(
+        "Recording PushConstants: layout={:?}, stages={:?}, offset={}, size={}",
+        layout, stage_flags, offset, size
+    );
+
+    // Copy the data from the pointer
+    let data = if size > 0 && !p_values.is_null() {
+        let src_slice = std::slice::from_raw_parts(p_values as *const u8, size as usize);
+        src_slice.to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::PushConstants {
+            layout,
+            stage_flags,
+            offset,
+            size,
+            data,
+        });
+}
+
 pub fn get_command_buffer_data(
     command_buffer: vk::CommandBuffer,
 ) -> Option<Arc<VkCommandBufferData>> {
@@ -557,6 +602,16 @@ pub fn replay_commands(
 
     // Track the active compute pipeline for dispatch commands
     let mut active_compute_pipeline: Option<Arc<wgpu::ComputePipeline>> = None;
+
+    // Track pending push constants - these need to be bound before the next draw/dispatch
+    let mut pending_push_constant_offset: Option<u32> = None;
+
+    // Push constant bind group (created once, used for all draws with dynamic offset)
+    let mut push_constant_bind_group: Option<Arc<wgpu::BindGroup>> = None;
+
+    // Get device data for push constant buffer access
+    let device_data = crate::device::get_device_data(cmd_data.device)
+        .ok_or_else(|| VkError::InvalidHandle("Invalid device".to_string()))?;
 
     for command in commands.iter() {
         match command {
@@ -837,12 +892,21 @@ pub fn replay_commands(
 
             RecordedCommand::BindDescriptorSets {
                 bind_point,
-                layout: _,
+                layout,
                 first_set,
                 descriptor_sets,
                 dynamic_offsets,
             } => {
                 debug!("Replay: BindDescriptorSets");
+
+                // Check if this pipeline layout has push constants
+                // If so, user descriptor sets are shifted by +1 (set 0 is reserved for push constants)
+                let has_push_constants =
+                    if let Some(layout_data) = pipeline::get_pipeline_layout_data(*layout) {
+                        !layout_data.push_constant_ranges.is_empty()
+                    } else {
+                        false
+                    };
 
                 for (i, &desc_set_handle) in descriptor_sets.iter().enumerate() {
                     let desc_data = descriptor::get_descriptor_set_data(desc_set_handle)
@@ -867,7 +931,13 @@ pub fn replay_commands(
                     _resource_refs
                         .push(wgpu_bind_group_arc as Arc<dyn std::any::Any + Send + Sync>);
 
-                    let set_index = first_set + i as u32;
+                    // Calculate actual set index
+                    // If pipeline has push constants, shift user sets by +1
+                    let set_index = if has_push_constants {
+                        first_set + i as u32 + 1
+                    } else {
+                        first_set + i as u32
+                    };
 
                     // Extract dynamic offsets for this set (if any)
                     // FIXME: This is a simplified implementation that only handles single descriptor sets correctly.
@@ -906,6 +976,35 @@ pub fn replay_commands(
                 }
             }
 
+            RecordedCommand::PushConstants {
+                layout: _,
+                stage_flags: _,
+                offset,
+                size,
+                data,
+            } => {
+                debug!("Replay: PushConstants(offset={}, size={})", offset, size);
+
+                // Write push constant data to the ring buffer
+                let buffer_offset = device_data.push_constant_buffer.push(&backend.queue, data);
+
+                // Create bind group if not already created
+                if push_constant_bind_group.is_none() {
+                    let bind_group = device_data
+                        .push_constant_buffer
+                        .create_bind_group(&backend.device);
+                    push_constant_bind_group = Some(Arc::new(bind_group));
+                }
+
+                // Store the offset for binding with the next draw/dispatch
+                pending_push_constant_offset = Some(buffer_offset);
+
+                debug!(
+                    "Push constants written to ring buffer at offset {}",
+                    buffer_offset
+                );
+            }
+
             RecordedCommand::Draw {
                 vertex_count,
                 instance_count,
@@ -918,6 +1017,23 @@ pub fn replay_commands(
                 );
 
                 if let Some(ref mut pass) = active_render_pass {
+                    // Bind push constants if pending
+                    if let (Some(ref bg), Some(offset)) =
+                        (&push_constant_bind_group, pending_push_constant_offset)
+                    {
+                        // SAFETY: Extend lifetime - bind group is kept alive in _resource_refs
+                        let bind_group_ref: &'static wgpu::BindGroup =
+                            unsafe { std::mem::transmute(bg.as_ref()) };
+                        _resource_refs.push(bg.clone() as Arc<dyn std::any::Any + Send + Sync>);
+
+                        // Bind at set 0 with dynamic offset
+                        pass.set_bind_group(0, bind_group_ref, &[offset]);
+                        debug!(
+                            "Bound push constants at set 0 with dynamic offset {}",
+                            offset
+                        );
+                    }
+
                     pass.draw(
                         *first_vertex..*first_vertex + *vertex_count,
                         *first_instance..*first_instance + *instance_count,
@@ -938,6 +1054,23 @@ pub fn replay_commands(
                 );
 
                 if let Some(ref mut pass) = active_render_pass {
+                    // Bind push constants if pending
+                    if let (Some(ref bg), Some(offset)) =
+                        (&push_constant_bind_group, pending_push_constant_offset)
+                    {
+                        // SAFETY: Extend lifetime - bind group is kept alive in _resource_refs
+                        let bind_group_ref: &'static wgpu::BindGroup =
+                            unsafe { std::mem::transmute(bg.as_ref()) };
+                        _resource_refs.push(bg.clone() as Arc<dyn std::any::Any + Send + Sync>);
+
+                        // Bind at set 0 with dynamic offset
+                        pass.set_bind_group(0, bind_group_ref, &[offset]);
+                        debug!(
+                            "Bound push constants at set 0 with dynamic offset {}",
+                            offset
+                        );
+                    }
+
                     pass.draw_indexed(
                         *first_index..*first_index + *index_count,
                         *vertex_offset,
@@ -985,6 +1118,23 @@ pub fn replay_commands(
                         _resource_refs
                             .push(pipeline_arc.clone() as Arc<dyn std::any::Any + Send + Sync>);
                         pass.set_pipeline(pipeline_ref);
+                    }
+
+                    // Bind push constants if pending
+                    if let (Some(ref bg), Some(offset)) =
+                        (&push_constant_bind_group, pending_push_constant_offset)
+                    {
+                        // SAFETY: Extend lifetime - bind group is kept alive in _resource_refs
+                        let bind_group_ref: &'static wgpu::BindGroup =
+                            unsafe { std::mem::transmute(bg.as_ref()) };
+                        _resource_refs.push(bg.clone() as Arc<dyn std::any::Any + Send + Sync>);
+
+                        // Bind at set 0 with dynamic offset
+                        pass.set_bind_group(0, bind_group_ref, &[offset]);
+                        debug!(
+                            "Bound push constants at set 0 with dynamic offset {}",
+                            offset
+                        );
                     }
 
                     pass.dispatch_workgroups(*group_count_x, *group_count_y, *group_count_z);
