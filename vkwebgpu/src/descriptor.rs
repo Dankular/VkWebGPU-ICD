@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::device;
 use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
+use crate::{buffer, image, sampler};
 
 pub static DESCRIPTOR_SET_LAYOUT_ALLOCATOR: Lazy<HandleAllocator<VkDescriptorSetLayoutData>> =
     Lazy::new(|| HandleAllocator::new());
@@ -74,14 +75,12 @@ pub unsafe fn create_descriptor_set_layout(
         std::slice::from_raw_parts(create_info.p_bindings, create_info.binding_count as usize)
             .iter()
             .map(|b| {
-                // Create a new binding with 'static lifetime
-                // This is safe because we're not using p_immutable_samplers
                 vk::DescriptorSetLayoutBinding {
                     binding: b.binding,
                     descriptor_type: b.descriptor_type,
                     descriptor_count: b.descriptor_count,
                     stage_flags: b.stage_flags,
-                    p_immutable_samplers: std::ptr::null(), // We don't support immutable samplers yet
+                    p_immutable_samplers: std::ptr::null(),
                     _marker: std::marker::PhantomData,
                 }
             })
@@ -100,10 +99,22 @@ pub unsafe fn create_descriptor_set_layout(
 
     #[cfg(not(target_arch = "wasm32"))]
     let wgpu_layout = {
-        let entries: Vec<wgpu::BindGroupLayoutEntry> = bindings
-            .iter()
-            .map(|binding| vk_to_wgpu_bind_group_layout_entry(binding))
-            .collect();
+        // For COMBINED_IMAGE_SAMPLER, we emit both a Texture entry and a Sampler entry.
+        // The sampler is placed at a synthetic binding = original_binding | 0x8000_0000
+        // so it doesn't collide with real bindings (which are always < 2^16 in practice).
+        let mut entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
+        for binding in &bindings {
+            entries.push(vk_to_wgpu_bind_group_layout_entry(binding));
+            if binding.descriptor_type == vk::DescriptorType::COMBINED_IMAGE_SAMPLER {
+                // Add the paired sampler entry at the synthetic slot.
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: combined_sampler_binding(binding.binding),
+                    visibility: vk_to_wgpu_shader_stages(binding.stage_flags),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                });
+            }
+        }
 
         device_data
             .backend
@@ -125,6 +136,13 @@ pub unsafe fn create_descriptor_set_layout(
     *p_set_layout = Handle::from_raw(layout_handle);
 
     Ok(())
+}
+
+/// Synthetic binding slot for the sampler half of a COMBINED_IMAGE_SAMPLER.
+/// Must not collide with real Vulkan descriptor bindings (which top out well under 2^16).
+#[inline]
+fn combined_sampler_binding(texture_binding: u32) -> u32 {
+    texture_binding | 0x8000_0000
 }
 
 pub unsafe fn destroy_descriptor_set_layout(
@@ -186,7 +204,6 @@ pub unsafe fn destroy_descriptor_pool(
         return;
     }
 
-    // Free all allocated sets
     if let Some(pool_data) = DESCRIPTOR_POOL_ALLOCATOR.get(descriptor_pool.as_raw()) {
         let sets = pool_data.allocated_sets.read().clone();
         for set in sets {
@@ -296,88 +313,110 @@ pub unsafe fn update_descriptor_sets(
 
         for write in writes {
             if let Some(set_data) = DESCRIPTOR_SET_ALLOCATOR.get(write.dst_set.as_raw()) {
-                let mut bindings = set_data.bindings.write();
+                // Update CPU-side bindings in a scoped lock so it's dropped before
+                // we rebuild the wgpu BindGroup (which also needs to read bindings).
+                {
+                    let mut bindings = set_data.bindings.write();
 
-                // Ensure bindings vector is large enough
-                let required_size = (write.dst_binding + write.descriptor_count) as usize;
-                if bindings.len() < required_size {
-                    bindings.resize(
-                        required_size,
-                        DescriptorBinding::Buffer {
-                            buffer: vk::Buffer::null(),
-                            offset: 0,
-                            range: 0,
-                        },
-                    );
-                }
+                    let required_size =
+                        (write.dst_binding + write.descriptor_count) as usize;
+                    if bindings.len() < required_size {
+                        bindings.resize(
+                            required_size,
+                            DescriptorBinding::Buffer {
+                                buffer: vk::Buffer::null(),
+                                offset: 0,
+                                range: 0,
+                            },
+                        );
+                    }
 
-                match write.descriptor_type {
-                    vk::DescriptorType::UNIFORM_BUFFER | vk::DescriptorType::STORAGE_BUFFER => {
-                        if !write.p_buffer_info.is_null() {
-                            let buffer_infos = std::slice::from_raw_parts(
-                                write.p_buffer_info,
-                                write.descriptor_count as usize,
-                            );
-
-                            for (i, info) in buffer_infos.iter().enumerate() {
-                                bindings[(write.dst_binding + i as u32) as usize] =
-                                    DescriptorBinding::Buffer {
-                                        buffer: info.buffer,
-                                        offset: info.offset,
-                                        range: info.range,
-                                    };
+                    match write.descriptor_type {
+                        vk::DescriptorType::UNIFORM_BUFFER
+                        | vk::DescriptorType::STORAGE_BUFFER
+                        | vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+                        | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC => {
+                            if !write.p_buffer_info.is_null() {
+                                let buffer_infos = std::slice::from_raw_parts(
+                                    write.p_buffer_info,
+                                    write.descriptor_count as usize,
+                                );
+                                for (i, info) in buffer_infos.iter().enumerate() {
+                                    bindings[(write.dst_binding + i as u32) as usize] =
+                                        DescriptorBinding::Buffer {
+                                            buffer: info.buffer,
+                                            offset: info.offset,
+                                            range: info.range,
+                                        };
+                                }
                             }
                         }
-                    }
-                    vk::DescriptorType::SAMPLED_IMAGE | vk::DescriptorType::STORAGE_IMAGE => {
-                        if !write.p_image_info.is_null() {
-                            let image_infos = std::slice::from_raw_parts(
-                                write.p_image_info,
-                                write.descriptor_count as usize,
-                            );
-
-                            for (i, info) in image_infos.iter().enumerate() {
-                                bindings[(write.dst_binding + i as u32) as usize] =
-                                    DescriptorBinding::ImageView {
-                                        image_view: info.image_view,
-                                        layout: info.image_layout,
-                                    };
+                        vk::DescriptorType::SAMPLED_IMAGE
+                        | vk::DescriptorType::STORAGE_IMAGE
+                        | vk::DescriptorType::INPUT_ATTACHMENT => {
+                            if !write.p_image_info.is_null() {
+                                let image_infos = std::slice::from_raw_parts(
+                                    write.p_image_info,
+                                    write.descriptor_count as usize,
+                                );
+                                for (i, info) in image_infos.iter().enumerate() {
+                                    bindings[(write.dst_binding + i as u32) as usize] =
+                                        DescriptorBinding::ImageView {
+                                            image_view: info.image_view,
+                                            layout: info.image_layout,
+                                        };
+                                }
                             }
                         }
-                    }
-                    vk::DescriptorType::SAMPLER => {
-                        if !write.p_image_info.is_null() {
-                            let image_infos = std::slice::from_raw_parts(
-                                write.p_image_info,
-                                write.descriptor_count as usize,
-                            );
-
-                            for (i, info) in image_infos.iter().enumerate() {
-                                bindings[(write.dst_binding + i as u32) as usize] =
-                                    DescriptorBinding::Sampler {
-                                        sampler: info.sampler,
-                                    };
+                        vk::DescriptorType::SAMPLER => {
+                            if !write.p_image_info.is_null() {
+                                let image_infos = std::slice::from_raw_parts(
+                                    write.p_image_info,
+                                    write.descriptor_count as usize,
+                                );
+                                for (i, info) in image_infos.iter().enumerate() {
+                                    bindings[(write.dst_binding + i as u32) as usize] =
+                                        DescriptorBinding::Sampler {
+                                            sampler: info.sampler,
+                                        };
+                                }
                             }
                         }
-                    }
-                    vk::DescriptorType::COMBINED_IMAGE_SAMPLER => {
-                        if !write.p_image_info.is_null() {
-                            let image_infos = std::slice::from_raw_parts(
-                                write.p_image_info,
-                                write.descriptor_count as usize,
-                            );
-
-                            for (i, info) in image_infos.iter().enumerate() {
-                                bindings[(write.dst_binding + i as u32) as usize] =
-                                    DescriptorBinding::CombinedImageSampler {
-                                        image_view: info.image_view,
-                                        sampler: info.sampler,
-                                        layout: info.image_layout,
-                                    };
+                        vk::DescriptorType::COMBINED_IMAGE_SAMPLER => {
+                            if !write.p_image_info.is_null() {
+                                let image_infos = std::slice::from_raw_parts(
+                                    write.p_image_info,
+                                    write.descriptor_count as usize,
+                                );
+                                for (i, info) in image_infos.iter().enumerate() {
+                                    bindings[(write.dst_binding + i as u32) as usize] =
+                                        DescriptorBinding::CombinedImageSampler {
+                                            image_view: info.image_view,
+                                            sampler: info.sampler,
+                                            layout: info.image_layout,
+                                        };
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
+                } // write lock released
+
+                // Rebuild the wgpu BindGroup now that bindings are updated.
+                // Returns None silently if any resource is not yet ready.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    match rebuild_bind_group(set_data.device, &set_data) {
+                        Some(bg) => {
+                            *set_data.wgpu_bind_group.write() = Some(bg);
+                            debug!("Rebuilt BindGroup for descriptor set after write");
+                        }
+                        None => {
+                            debug!(
+                                "Descriptor set not yet fully populated; BindGroup deferred"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -393,31 +432,182 @@ pub unsafe fn update_descriptor_sets(
             let dst_data = DESCRIPTOR_SET_ALLOCATOR.get(copy.dst_set.as_raw());
 
             if let (Some(src), Some(dst)) = (src_data, dst_data) {
-                let src_bindings = src.bindings.read();
-                let mut dst_bindings = dst.bindings.write();
+                {
+                    let src_bindings = src.bindings.read();
+                    let mut dst_bindings = dst.bindings.write();
 
-                let required_size = (copy.dst_binding + copy.descriptor_count) as usize;
-                if dst_bindings.len() < required_size {
-                    dst_bindings.resize(
-                        required_size,
-                        DescriptorBinding::Buffer {
-                            buffer: vk::Buffer::null(),
-                            offset: 0,
-                            range: 0,
-                        },
-                    );
-                }
+                    let required_size = (copy.dst_binding + copy.descriptor_count) as usize;
+                    if dst_bindings.len() < required_size {
+                        dst_bindings.resize(
+                            required_size,
+                            DescriptorBinding::Buffer {
+                                buffer: vk::Buffer::null(),
+                                offset: 0,
+                                range: 0,
+                            },
+                        );
+                    }
 
-                for i in 0..copy.descriptor_count as usize {
-                    let src_idx = (copy.src_binding as usize) + i;
-                    let dst_idx = (copy.dst_binding as usize) + i;
-                    if src_idx < src_bindings.len() {
-                        dst_bindings[dst_idx] = src_bindings[src_idx].clone();
+                    for i in 0..copy.descriptor_count as usize {
+                        let src_idx = (copy.src_binding as usize) + i;
+                        let dst_idx = (copy.dst_binding as usize) + i;
+                        if src_idx < src_bindings.len() {
+                            dst_bindings[dst_idx] = src_bindings[src_idx].clone();
+                        }
+                    }
+                } // both locks released
+
+                // Rebuild the destination set's BindGroup.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(bg) = rebuild_bind_group(dst.device, &dst) {
+                        *dst.wgpu_bind_group.write() = Some(bg);
+                        debug!("Rebuilt BindGroup for copied descriptor set");
                     }
                 }
             }
         }
     }
+}
+
+/// Rebuild the wgpu BindGroup for a descriptor set from its current CPU-side bindings.
+///
+/// Returns `None` silently if any required resource is not yet available (partial update,
+/// null handle, or wgpu object not yet created). The caller should retry after all writes.
+#[cfg(not(target_arch = "wasm32"))]
+fn rebuild_bind_group(
+    device: vk::Device,
+    set_data: &VkDescriptorSetData,
+) -> Option<Arc<wgpu::BindGroup>> {
+    let layout_data = DESCRIPTOR_SET_LAYOUT_ALLOCATOR.get(set_data.layout.as_raw())?;
+    let device_data = device::get_device_data(device)?;
+    let bindings = set_data.bindings.read();
+
+    // Collected resources: hold Arcs so the wgpu objects remain alive for the
+    // duration of create_bind_group. Entries are built in a second pass that
+    // borrows from these Arcs, which avoids Vec-reallocation lifetime issues.
+    enum Collected {
+        Buffer(Arc<wgpu::Buffer>, u64, Option<wgpu::BufferSize>),
+        View(Arc<wgpu::TextureView>),
+        Sampler(Arc<wgpu::Sampler>),
+    }
+    let mut collected: Vec<(u32, Collected)> =
+        Vec::with_capacity(layout_data.bindings.len() * 2);
+
+    for layout_binding in &layout_data.bindings {
+        let binding_idx = layout_binding.binding as usize;
+        if binding_idx >= bindings.len() {
+            // This slot has not been written yet — defer BindGroup creation.
+            return None;
+        }
+
+        match &bindings[binding_idx] {
+            DescriptorBinding::Buffer { buffer, offset, range } => {
+                if *buffer == vk::Buffer::null() {
+                    // Placeholder padding slot; not a real write yet.
+                    return None;
+                }
+                let buf_data = buffer::get_buffer_data(*buffer)?;
+                let wgpu_buf = {
+                    let g = buf_data.wgpu_buffer.read();
+                    Arc::clone(g.as_ref()?)
+                };
+                // vk::WHOLE_SIZE == u64::MAX; map to None (remaining buffer).
+                let size = if *range == vk::WHOLE_SIZE || *range == 0 {
+                    None
+                } else {
+                    wgpu::BufferSize::new(*range)
+                };
+                collected.push((
+                    layout_binding.binding,
+                    Collected::Buffer(wgpu_buf, *offset, size),
+                ));
+            }
+
+            DescriptorBinding::ImageView { image_view, .. } => {
+                if *image_view == vk::ImageView::null() {
+                    return None;
+                }
+                let view_data = image::get_image_view_data(*image_view)?;
+                let wgpu_view = {
+                    let g = view_data.wgpu_view.read();
+                    Arc::clone(g.as_ref()?)
+                };
+                collected.push((layout_binding.binding, Collected::View(wgpu_view)));
+            }
+
+            DescriptorBinding::Sampler { sampler } => {
+                if *sampler == vk::Sampler::null() {
+                    return None;
+                }
+                let samp_data = sampler::get_sampler_data(*sampler)?;
+                collected.push((
+                    layout_binding.binding,
+                    Collected::Sampler(Arc::clone(&samp_data.wgpu_sampler)),
+                ));
+            }
+
+            DescriptorBinding::CombinedImageSampler {
+                image_view,
+                sampler,
+                ..
+            } => {
+                if *image_view == vk::ImageView::null() {
+                    return None;
+                }
+                let view_data = image::get_image_view_data(*image_view)?;
+                let wgpu_view = {
+                    let g = view_data.wgpu_view.read();
+                    Arc::clone(g.as_ref()?)
+                };
+                // Texture at the original binding.
+                collected.push((layout_binding.binding, Collected::View(wgpu_view)));
+
+                // Sampler at the synthetic slot that matches the layout we created.
+                if *sampler != vk::Sampler::null() {
+                    if let Some(samp_data) = sampler::get_sampler_data(*sampler) {
+                        collected.push((
+                            combined_sampler_binding(layout_binding.binding),
+                            Collected::Sampler(Arc::clone(&samp_data.wgpu_sampler)),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Second pass: build BindGroupEntries borrowing from the collected Arcs.
+    // The lifetimes work because `collected` outlives `entries` and both outlive
+    // the `create_bind_group` call.
+    let entries: Vec<wgpu::BindGroupEntry> = collected
+        .iter()
+        .map(|(binding, res)| wgpu::BindGroupEntry {
+            binding: *binding,
+            resource: match res {
+                Collected::Buffer(buf, offset, size) => {
+                    wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: buf,
+                        offset: *offset,
+                        size: *size,
+                    })
+                }
+                Collected::View(view) => wgpu::BindingResource::TextureView(view),
+                Collected::Sampler(samp) => wgpu::BindingResource::Sampler(samp),
+            },
+        })
+        .collect();
+
+    let bind_group =
+        device_data
+            .backend
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("VkDescriptorSet"),
+                layout: &layout_data.wgpu_layout,
+                entries: &entries,
+            });
+
+    Some(Arc::new(bind_group))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -469,13 +659,13 @@ fn vk_to_wgpu_binding_type(desc_type: vk::DescriptorType, _count: u32) -> wgpu::
                 min_binding_size: None,
             }
         }
-        vk::DescriptorType::SAMPLED_IMAGE | vk::DescriptorType::COMBINED_IMAGE_SAMPLER => {
-            wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            }
-        }
+        vk::DescriptorType::SAMPLED_IMAGE
+        | vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+        | vk::DescriptorType::INPUT_ATTACHMENT => wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
         vk::DescriptorType::STORAGE_IMAGE => wgpu::BindingType::StorageTexture {
             access: wgpu::StorageTextureAccess::WriteOnly,
             format: wgpu::TextureFormat::Rgba8Unorm,
