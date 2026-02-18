@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use crate::backend::WebGPUBackend;
 use crate::error::{Result, VkError};
-use crate::handle::HandleAllocator;
+use crate::handle::{self, HandleAllocator};
 use crate::instance;
 use crate::push_constants::PushConstantRingBuffer;
 use crate::shader::ShaderCache;
@@ -107,8 +107,10 @@ pub unsafe fn create_device(
         push_constant_buffer,
     };
 
-    let device_handle = DEVICE_ALLOCATOR.allocate(device_data);
-    *p_device = Handle::from_raw(device_handle);
+    let device_index = DEVICE_ALLOCATOR.allocate(device_data);
+    // Dispatchable handle: heap-alloc a slot with ICD_LOADER_MAGIC at offset 0
+    let device_ptr = handle::alloc_dispatchable(device_index);
+    *p_device = Handle::from_raw(device_ptr);
 
     info!("Logical device created successfully");
     Ok(())
@@ -192,17 +194,17 @@ pub unsafe fn get_descriptor_set_layout_support(
 }
 
 pub unsafe fn destroy_device(device: vk::Device, _p_allocator: *const vk::AllocationCallbacks) {
-    let device_handle = device.as_raw();
-    if let Some(device_data) = DEVICE_ALLOCATOR.get(device_handle) {
-        // Clear shader cache
+    let raw = device.as_raw();
+    if let Some(device_data) = DEVICE_ALLOCATOR.get_dispatchable(raw) {
         device_data.shader_cache.clear();
     }
-    DEVICE_ALLOCATOR.remove(device_handle);
+    DEVICE_ALLOCATOR.remove_dispatchable(raw);
+    handle::free_dispatchable(raw);
     info!("Device destroyed");
 }
 
 pub fn get_device_data(device: vk::Device) -> Option<Arc<VkDeviceData>> {
-    DEVICE_ALLOCATOR.get(device.as_raw())
+    DEVICE_ALLOCATOR.get_dispatchable(device.as_raw())
 }
 
 pub unsafe fn device_wait_idle(device: vk::Device) -> Result<()> {

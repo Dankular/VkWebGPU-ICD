@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::backend::{CommandBuffer, WebGPUBackend};
 use crate::command_pool;
 use crate::error::{Result, VkError};
-use crate::handle::HandleAllocator;
+use crate::handle::{self, HandleAllocator};
 
 pub static COMMAND_BUFFER_ALLOCATOR: Lazy<HandleAllocator<VkCommandBufferData>> =
     Lazy::new(|| HandleAllocator::new());
@@ -381,8 +381,9 @@ pub unsafe fn allocate_command_buffers(
             commands: RwLock::new(Vec::new()),
         };
 
-        let cmd_handle = COMMAND_BUFFER_ALLOCATOR.allocate(cmd_data);
-        *cmd_buffer = Handle::from_raw(cmd_handle);
+        let cmd_index = COMMAND_BUFFER_ALLOCATOR.allocate(cmd_data);
+        let cmd_ptr = handle::alloc_dispatchable(cmd_index);
+        *cmd_buffer = Handle::from_raw(cmd_ptr);
 
         pool_data.allocated_buffers.write().push(*cmd_buffer);
     }
@@ -395,7 +396,7 @@ pub unsafe fn begin_command_buffer(
     _p_begin_info: *const vk::CommandBufferBeginInfo,
 ) -> Result<()> {
     let cmd_data = COMMAND_BUFFER_ALLOCATOR
-        .get(command_buffer.as_raw())
+        .get_dispatchable(command_buffer.as_raw())
         .ok_or_else(|| VkError::InvalidHandle("Invalid command buffer".to_string()))?;
 
     debug!("Beginning command buffer recording");
@@ -410,7 +411,7 @@ pub unsafe fn begin_command_buffer(
 
 pub unsafe fn end_command_buffer(command_buffer: vk::CommandBuffer) -> Result<()> {
     let cmd_data = COMMAND_BUFFER_ALLOCATOR
-        .get(command_buffer.as_raw())
+        .get_dispatchable(command_buffer.as_raw())
         .ok_or_else(|| VkError::InvalidHandle("Invalid command buffer".to_string()))?;
 
     debug!("Ending command buffer recording");
@@ -433,7 +434,9 @@ pub unsafe fn free_command_buffers(
 
     for &cmd_buffer in buffers {
         if cmd_buffer != vk::CommandBuffer::null() {
-            COMMAND_BUFFER_ALLOCATOR.remove(cmd_buffer.as_raw());
+            let raw = cmd_buffer.as_raw();
+            COMMAND_BUFFER_ALLOCATOR.remove_dispatchable(raw);
+            handle::free_dispatchable(raw);
         }
     }
 
@@ -453,7 +456,7 @@ pub unsafe fn reset_command_buffer(
     _flags: vk::CommandBufferResetFlags,
 ) -> Result<()> {
     let cmd_data = COMMAND_BUFFER_ALLOCATOR
-        .get(command_buffer.as_raw())
+        .get_dispatchable(command_buffer.as_raw())
         .ok_or_else(|| VkError::InvalidHandle("Invalid command buffer".to_string()))?;
 
     cmd_data.commands.write().clear();
@@ -471,7 +474,7 @@ pub unsafe fn reset_command_pool(
     if let Some(pool_data) = command_pool::get_command_pool_data(command_pool) {
         let allocated = pool_data.allocated_buffers.read().clone();
         for &cmd_buffer in &allocated {
-            if let Some(cmd_data) = COMMAND_BUFFER_ALLOCATOR.get(cmd_buffer.as_raw()) {
+            if let Some(cmd_data) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(cmd_buffer.as_raw()) {
                 cmd_data.commands.write().clear();
                 *cmd_data.state.write() = CommandBufferState::Initial;
             }
@@ -486,7 +489,7 @@ pub unsafe fn cmd_begin_render_pass(
     p_render_pass_begin: *const vk::RenderPassBeginInfo,
     _contents: vk::SubpassContents,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -517,7 +520,7 @@ pub unsafe fn cmd_begin_render_pass(
 }
 
 pub unsafe fn cmd_end_render_pass(command_buffer: vk::CommandBuffer) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -535,7 +538,7 @@ pub unsafe fn cmd_bind_pipeline(
     pipeline_bind_point: vk::PipelineBindPoint,
     pipeline: vk::Pipeline,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -561,7 +564,7 @@ pub unsafe fn cmd_bind_descriptor_sets(
     dynamic_offset_count: u32,
     p_dynamic_offsets: *const u32,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -602,7 +605,7 @@ pub unsafe fn cmd_draw(
     first_vertex: u32,
     first_instance: u32,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -628,7 +631,7 @@ pub unsafe fn cmd_draw_indexed(
     vertex_offset: i32,
     first_instance: u32,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -657,7 +660,7 @@ pub unsafe fn cmd_bind_vertex_buffers(
     p_buffers: *const vk::Buffer,
     p_offsets: *const vk::DeviceSize,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -695,7 +698,7 @@ pub unsafe fn cmd_bind_index_buffer(
     offset: vk::DeviceSize,
     index_type: vk::IndexType,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -722,7 +725,7 @@ pub unsafe fn cmd_copy_buffer(
     region_count: u32,
     p_regions: *const vk::BufferCopy,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -750,7 +753,7 @@ pub unsafe fn cmd_copy_buffer_to_image(
     region_count: u32,
     p_regions: *const vk::BufferImageCopy,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -786,7 +789,7 @@ pub unsafe fn cmd_pipeline_barrier(
     image_memory_barrier_count: u32,
     _p_image_memory_barriers: *const vk::ImageMemoryBarrier,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -813,7 +816,7 @@ pub unsafe fn cmd_dispatch(
     group_count_y: u32,
     group_count_z: u32,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -838,7 +841,7 @@ pub unsafe fn cmd_push_constants(
     size: u32,
     p_values: *const std::ffi::c_void,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -874,7 +877,7 @@ pub unsafe fn cmd_set_viewport(
     viewport_count: u32,
     p_viewports: *const vk::Viewport,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -905,7 +908,7 @@ pub unsafe fn cmd_set_scissor(
     scissor_count: u32,
     p_scissors: *const vk::Rect2D,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -931,7 +934,7 @@ pub unsafe fn cmd_set_blend_constants(
     command_buffer: vk::CommandBuffer,
     blend_constants: *const [f32; 4],
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -957,7 +960,7 @@ pub unsafe fn cmd_set_stencil_reference(
     face_mask: vk::StencilFaceFlags,
     reference: u32,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -984,7 +987,7 @@ pub unsafe fn cmd_clear_color_image(
     range_count: u32,
     p_ranges: *const vk::ImageSubresourceRange,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1022,7 +1025,7 @@ pub unsafe fn cmd_clear_depth_stencil_image(
     range_count: u32,
     p_ranges: *const vk::ImageSubresourceRange,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1059,7 +1062,7 @@ pub unsafe fn cmd_clear_attachments(
     rect_count: u32,
     p_rects: *const vk::ClearRect,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1095,7 +1098,7 @@ pub unsafe fn cmd_copy_image_to_buffer(
     region_count: u32,
     p_regions: *const vk::BufferImageCopy,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1128,7 +1131,7 @@ pub unsafe fn cmd_copy_image(
     region_count: u32,
     p_regions: *const vk::ImageCopy,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1160,7 +1163,7 @@ pub unsafe fn cmd_blit_image(
     p_regions: *const vk::ImageBlit,
     filter: vk::Filter,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1186,7 +1189,7 @@ pub unsafe fn cmd_blit_image(
 pub fn get_command_buffer_data(
     command_buffer: vk::CommandBuffer,
 ) -> Option<Arc<VkCommandBufferData>> {
-    COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw())
+    COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw())
 }
 
 // ─── Dynamic rendering ────────────────────────────────────────────────────────
@@ -1195,7 +1198,7 @@ pub unsafe fn cmd_begin_rendering(
     command_buffer: vk::CommandBuffer,
     p_rendering_info: *const vk::RenderingInfo,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1267,7 +1270,7 @@ pub unsafe fn cmd_begin_rendering(
 }
 
 pub unsafe fn cmd_end_rendering(command_buffer: vk::CommandBuffer) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1287,7 +1290,7 @@ pub unsafe fn cmd_draw_indirect(
     draw_count: u32,
     stride: u32,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1310,7 +1313,7 @@ pub unsafe fn cmd_draw_indexed_indirect(
     draw_count: u32,
     stride: u32,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1335,7 +1338,7 @@ pub unsafe fn cmd_fill_buffer(
     size: vk::DeviceSize,
     data: u32,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(d) => d,
         None => return,
     };
@@ -1353,7 +1356,7 @@ pub unsafe fn cmd_update_buffer(
     data_size: vk::DeviceSize,
     p_data: *const std::ffi::c_void,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(d) => d,
         None => return,
     };
@@ -1375,7 +1378,7 @@ pub unsafe fn cmd_pipeline_barrier2(
     command_buffer: vk::CommandBuffer,
     _p_dependency_info: *const vk::DependencyInfo,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1392,7 +1395,7 @@ pub unsafe fn cmd_copy_buffer2(
     command_buffer: vk::CommandBuffer,
     p_copy_buffer_info: *const vk::CopyBufferInfo2,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1417,7 +1420,7 @@ pub unsafe fn cmd_copy_image2(
     command_buffer: vk::CommandBuffer,
     p_copy_image_info: *const vk::CopyImageInfo2,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1450,7 +1453,7 @@ pub unsafe fn cmd_copy_buffer_to_image2(
     command_buffer: vk::CommandBuffer,
     p_copy_buffer_to_image_info: *const vk::CopyBufferToImageInfo2,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1483,7 +1486,7 @@ pub unsafe fn cmd_copy_image_to_buffer2(
     command_buffer: vk::CommandBuffer,
     p_copy_image_to_buffer_info: *const vk::CopyImageToBufferInfo2,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1516,7 +1519,7 @@ pub unsafe fn cmd_blit_image2(
     command_buffer: vk::CommandBuffer,
     p_blit_image_info: *const vk::BlitImageInfo2,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1560,7 +1563,7 @@ pub unsafe fn cmd_resolve_image(
     region_count: u32,
     p_regions: *const vk::ImageResolve,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1578,13 +1581,13 @@ pub unsafe fn cmd_resolve_image(
 // ─── Extended dynamic state ───────────────────────────────────────────────────
 
 pub unsafe fn cmd_set_cull_mode(command_buffer: vk::CommandBuffer, cull_mode: vk::CullModeFlags) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         d.commands.write().push(RecordedCommand::SetCullMode { cull_mode });
     }
 }
 
 pub unsafe fn cmd_set_front_face(command_buffer: vk::CommandBuffer, front_face: vk::FrontFace) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         d.commands.write().push(RecordedCommand::SetFrontFace { front_face });
     }
 }
@@ -1593,7 +1596,7 @@ pub unsafe fn cmd_set_primitive_topology(
     command_buffer: vk::CommandBuffer,
     primitive_topology: vk::PrimitiveTopology,
 ) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         d.commands.write().push(RecordedCommand::SetPrimitiveTopology { primitive_topology });
     }
 }
@@ -1602,7 +1605,7 @@ pub unsafe fn cmd_set_depth_test_enable(
     command_buffer: vk::CommandBuffer,
     depth_test_enable: vk::Bool32,
 ) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         d.commands.write().push(RecordedCommand::SetDepthTestEnable { depth_test_enable });
     }
 }
@@ -1611,7 +1614,7 @@ pub unsafe fn cmd_set_depth_write_enable(
     command_buffer: vk::CommandBuffer,
     depth_write_enable: vk::Bool32,
 ) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         d.commands.write().push(RecordedCommand::SetDepthWriteEnable { depth_write_enable });
     }
 }
@@ -1620,7 +1623,7 @@ pub unsafe fn cmd_set_depth_compare_op(
     command_buffer: vk::CommandBuffer,
     depth_compare_op: vk::CompareOp,
 ) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         d.commands.write().push(RecordedCommand::SetDepthCompareOp { depth_compare_op });
     }
 }
@@ -1629,7 +1632,7 @@ pub unsafe fn cmd_set_depth_bias_enable(
     command_buffer: vk::CommandBuffer,
     depth_bias_enable: vk::Bool32,
 ) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         d.commands.write().push(RecordedCommand::SetDepthBiasEnable { depth_bias_enable });
     }
 }
@@ -1638,7 +1641,7 @@ pub unsafe fn cmd_set_stencil_test_enable(
     command_buffer: vk::CommandBuffer,
     stencil_test_enable: vk::Bool32,
 ) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         d.commands.write().push(RecordedCommand::SetStencilTestEnable { stencil_test_enable });
     }
 }
@@ -1651,7 +1654,7 @@ pub unsafe fn cmd_set_stencil_op(
     depth_fail_op: vk::StencilOp,
     compare_op: vk::CompareOp,
 ) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         d.commands.write().push(RecordedCommand::SetStencilOp {
             face_mask, fail_op, pass_op, depth_fail_op, compare_op,
         });
@@ -1663,13 +1666,13 @@ pub unsafe fn cmd_set_depth_bounds(
     min_depth_bounds: f32,
     max_depth_bounds: f32,
 ) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         d.commands.write().push(RecordedCommand::SetDepthBounds { min_depth_bounds, max_depth_bounds });
     }
 }
 
 pub unsafe fn cmd_set_line_width(command_buffer: vk::CommandBuffer, line_width: f32) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         d.commands.write().push(RecordedCommand::SetLineWidth { line_width });
     }
 }
@@ -1680,7 +1683,7 @@ pub unsafe fn cmd_set_depth_bias(
     depth_bias_clamp: f32,
     depth_bias_slope_factor: f32,
 ) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         d.commands.write().push(RecordedCommand::SetDepthBias {
             depth_bias_constant_factor, depth_bias_clamp, depth_bias_slope_factor,
         });
@@ -1694,7 +1697,7 @@ pub unsafe fn cmd_begin_render_pass2(
     p_render_pass_begin: *const vk::RenderPassBeginInfo,
     _p_subpass_begin_info: *const vk::SubpassBeginInfo,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1722,7 +1725,7 @@ pub unsafe fn cmd_next_subpass2(
     _p_subpass_begin_info: *const vk::SubpassBeginInfo,
     _p_subpass_end_info: *const vk::SubpassEndInfo,
 ) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         debug!("Recording NextSubpass2 (no-op)");
         d.commands.write().push(RecordedCommand::NextSubpass2);
     }
@@ -1732,7 +1735,7 @@ pub unsafe fn cmd_end_render_pass2(
     command_buffer: vk::CommandBuffer,
     _p_subpass_end_info: *const vk::SubpassEndInfo,
 ) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         debug!("Recording EndRenderPass2");
         d.commands.write().push(RecordedCommand::EndRenderPass2);
     }
@@ -1742,7 +1745,7 @@ pub unsafe fn cmd_next_subpass(
     command_buffer: vk::CommandBuffer,
     _contents: vk::SubpassContents,
 ) {
-    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    if let Some(d) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         debug!("Recording NextSubpass (no-op)");
         d.commands.write().push(RecordedCommand::NextSubpass);
     }
@@ -1755,7 +1758,7 @@ pub unsafe fn cmd_execute_commands(
     command_buffer_count: u32,
     p_command_buffers: *const vk::CommandBuffer,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -1779,7 +1782,7 @@ pub unsafe fn cmd_dispatch_base(
     group_count_y: u32,
     group_count_z: u32,
 ) {
-    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(command_buffer.as_raw()) {
         Some(data) => data,
         None => return,
     };
@@ -4296,7 +4299,7 @@ pub fn replay_commands(
                 drop(active_compute_pass.take());
                 // For secondary command buffers, replay their commands inline
                 for &secondary_cb in command_buffers {
-                    if let Some(secondary_data) = COMMAND_BUFFER_ALLOCATOR.get(secondary_cb.as_raw()) {
+                    if let Some(secondary_data) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(secondary_cb.as_raw()) {
                         // We can't directly replay here since replay_commands takes ownership of encoder
                         // The secondary commands will be submitted separately via queue submit
                         debug!("Warning: ExecuteCommands with secondary buffer - secondary buffers should be pre-recorded");

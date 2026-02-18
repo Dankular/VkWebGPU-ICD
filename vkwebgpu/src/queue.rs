@@ -10,7 +10,7 @@ use crate::command_buffer;
 use crate::device;
 use crate::memory;
 use crate::error::{Result, VkError};
-use crate::handle::HandleAllocator;
+use crate::handle::{self, HandleAllocator};
 
 pub static QUEUE_ALLOCATOR: Lazy<HandleAllocator<VkQueueData>> =
     Lazy::new(|| HandleAllocator::new());
@@ -38,13 +38,14 @@ pub unsafe fn get_device_queue(
         queue_index,
     };
 
-    let queue_handle = QUEUE_ALLOCATOR.allocate(queue_data);
-    *p_queue = Handle::from_raw(queue_handle);
+    let queue_index = QUEUE_ALLOCATOR.allocate(queue_data);
+    let queue_ptr = handle::alloc_dispatchable(queue_index);
+    *p_queue = Handle::from_raw(queue_ptr);
 
     // Store in device's queue list
     if let Some(device_data) = device::get_device_data(device) {
         let mut queues = device_data.queues.write();
-        queues.push(Handle::from_raw(queue_handle));
+        queues.push(Handle::from_raw(queue_ptr));
     }
 }
 
@@ -55,7 +56,7 @@ pub unsafe fn queue_submit(
     fence: vk::Fence,
 ) -> Result<()> {
     let queue_data = QUEUE_ALLOCATOR
-        .get(queue.as_raw())
+        .get_dispatchable(queue.as_raw())
         .ok_or_else(|| VkError::InvalidHandle("Invalid queue".to_string()))?;
 
     let device_data = device::get_device_data(queue_data.device)
@@ -134,7 +135,7 @@ pub unsafe fn queue_submit2(
     fence: vk::Fence,
 ) -> Result<()> {
     let queue_data = QUEUE_ALLOCATOR
-        .get(queue.as_raw())
+        .get_dispatchable(queue.as_raw())
         .ok_or_else(|| VkError::InvalidHandle("Invalid queue".to_string()))?;
 
     let device_data = device::get_device_data(queue_data.device)
@@ -235,12 +236,12 @@ pub unsafe fn get_device_queue2(
 
 pub unsafe fn queue_wait_idle(queue: vk::Queue) -> Result<()> {
     let queue_data = QUEUE_ALLOCATOR
-        .get(queue.as_raw())
+        .get_dispatchable(queue.as_raw())
         .ok_or_else(|| VkError::InvalidHandle("Invalid queue".to_string()))?;
 
     device::device_wait_idle(queue_data.device)
 }
 
 pub fn get_queue_data(queue: vk::Queue) -> Option<Arc<VkQueueData>> {
-    QUEUE_ALLOCATOR.get(queue.as_raw())
+    QUEUE_ALLOCATOR.get_dispatchable(queue.as_raw())
 }
