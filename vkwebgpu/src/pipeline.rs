@@ -258,19 +258,71 @@ unsafe fn create_wgpu_render_pipeline(
     };
 
     // Primitive state
-    let primitive = if !create_info.p_input_assembly_state.is_null() {
-        let ias = &*create_info.p_input_assembly_state;
+    let primitive = {
+        let topology = if !create_info.p_input_assembly_state.is_null() {
+            let ias = &*create_info.p_input_assembly_state;
+            vk_to_wgpu_primitive_topology(ias.topology)
+        } else {
+            wgpu::PrimitiveTopology::TriangleList
+        };
+
+        let (front_face, cull_mode, polygon_mode) = if !create_info.p_rasterization_state.is_null()
+        {
+            let rs = &*create_info.p_rasterization_state;
+            let front_face = if rs.front_face == vk::FrontFace::CLOCKWISE {
+                wgpu::FrontFace::Cw
+            } else {
+                wgpu::FrontFace::Ccw
+            };
+            let cull_mode = match rs.cull_mode {
+                vk::CullModeFlags::NONE => None,
+                vk::CullModeFlags::FRONT => Some(wgpu::Face::Front),
+                vk::CullModeFlags::BACK => Some(wgpu::Face::Back),
+                _ => None,
+            };
+            let polygon_mode = match rs.polygon_mode {
+                vk::PolygonMode::FILL => wgpu::PolygonMode::Fill,
+                vk::PolygonMode::LINE => wgpu::PolygonMode::Line,
+                vk::PolygonMode::POINT => wgpu::PolygonMode::Point,
+                _ => wgpu::PolygonMode::Fill,
+            };
+            (front_face, cull_mode, polygon_mode)
+        } else {
+            (wgpu::FrontFace::Ccw, None, wgpu::PolygonMode::Fill)
+        };
+
         wgpu::PrimitiveState {
-            topology: vk_to_wgpu_primitive_topology(ias.topology),
+            topology,
             strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            polygon_mode: wgpu::PolygonMode::Fill,
+            front_face,
+            cull_mode,
+            polygon_mode,
             unclipped_depth: false,
             conservative: false,
         }
+    };
+
+    // Depth/stencil state
+    let depth_stencil = if !create_info.p_depth_stencil_state.is_null() {
+        let dss = &*create_info.p_depth_stencil_state;
+        if dss.depth_test_enable == vk::TRUE || dss.depth_write_enable == vk::TRUE {
+            Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus, // TODO: Get from render pass
+                depth_write_enabled: dss.depth_write_enable == vk::TRUE,
+                depth_compare: vk_to_wgpu_compare_function(dss.depth_compare_op),
+                stencil: wgpu::StencilState {
+                    front: vk_to_wgpu_stencil_face_state(&dss.front),
+                    back: vk_to_wgpu_stencil_face_state(&dss.back),
+                    read_mask: dss.front.compare_mask,
+                    write_mask: dss.front.write_mask,
+                },
+                bias: wgpu::DepthBiasState::default(),
+            })
+        } else {
+            None
+        }
     } else {
-        wgpu::PrimitiveState::default()
+        None
     };
 
     let pipeline =
@@ -287,7 +339,7 @@ unsafe fn create_wgpu_render_pipeline(
                     compilation_options: Default::default(),
                 },
                 primitive,
-                depth_stencil: None,
+                depth_stencil,
                 multisample: wgpu::MultisampleState::default(),
                 fragment: fragment_module.as_ref().map(|module| wgpu::FragmentState {
                     module,
@@ -465,6 +517,46 @@ fn vk_to_wgpu_color_write_mask(mask: vk::ColorComponentFlags) -> wgpu::ColorWrit
         writes |= wgpu::ColorWrites::ALPHA;
     }
     writes
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn vk_to_wgpu_compare_function(op: vk::CompareOp) -> wgpu::CompareFunction {
+    match op {
+        vk::CompareOp::NEVER => wgpu::CompareFunction::Never,
+        vk::CompareOp::LESS => wgpu::CompareFunction::Less,
+        vk::CompareOp::EQUAL => wgpu::CompareFunction::Equal,
+        vk::CompareOp::LESS_OR_EQUAL => wgpu::CompareFunction::LessEqual,
+        vk::CompareOp::GREATER => wgpu::CompareFunction::Greater,
+        vk::CompareOp::NOT_EQUAL => wgpu::CompareFunction::NotEqual,
+        vk::CompareOp::GREATER_OR_EQUAL => wgpu::CompareFunction::GreaterEqual,
+        vk::CompareOp::ALWAYS => wgpu::CompareFunction::Always,
+        _ => wgpu::CompareFunction::Always,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn vk_to_wgpu_stencil_operation(op: vk::StencilOp) -> wgpu::StencilOperation {
+    match op {
+        vk::StencilOp::KEEP => wgpu::StencilOperation::Keep,
+        vk::StencilOp::ZERO => wgpu::StencilOperation::Zero,
+        vk::StencilOp::REPLACE => wgpu::StencilOperation::Replace,
+        vk::StencilOp::INCREMENT_AND_CLAMP => wgpu::StencilOperation::IncrementClamp,
+        vk::StencilOp::DECREMENT_AND_CLAMP => wgpu::StencilOperation::DecrementClamp,
+        vk::StencilOp::INVERT => wgpu::StencilOperation::Invert,
+        vk::StencilOp::INCREMENT_AND_WRAP => wgpu::StencilOperation::IncrementWrap,
+        vk::StencilOp::DECREMENT_AND_WRAP => wgpu::StencilOperation::DecrementWrap,
+        _ => wgpu::StencilOperation::Keep,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn vk_to_wgpu_stencil_face_state(state: &vk::StencilOpState) -> wgpu::StencilFaceState {
+    wgpu::StencilFaceState {
+        compare: vk_to_wgpu_compare_function(state.compare_op),
+        fail_op: vk_to_wgpu_stencil_operation(state.fail_op),
+        depth_fail_op: vk_to_wgpu_stencil_operation(state.depth_fail_op),
+        pass_op: vk_to_wgpu_stencil_operation(state.pass_op),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
