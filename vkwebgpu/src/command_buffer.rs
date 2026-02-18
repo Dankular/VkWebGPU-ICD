@@ -107,6 +107,58 @@ pub enum RecordedCommand {
         dst_stage_mask: vk::PipelineStageFlags,
         dependency_flags: vk::DependencyFlags,
     },
+    SetViewport {
+        first_viewport: u32,
+        viewports: Vec<vk::Viewport>,
+    },
+    SetScissor {
+        first_scissor: u32,
+        scissors: Vec<vk::Rect2D>,
+    },
+    SetBlendConstants {
+        blend_constants: [f32; 4],
+    },
+    SetStencilReference {
+        face_mask: vk::StencilFaceFlags,
+        reference: u32,
+    },
+    ClearColorImage {
+        image: vk::Image,
+        image_layout: vk::ImageLayout,
+        color: vk::ClearColorValue,
+        ranges: Vec<vk::ImageSubresourceRange>,
+    },
+    ClearDepthStencilImage {
+        image: vk::Image,
+        image_layout: vk::ImageLayout,
+        depth_stencil: vk::ClearDepthStencilValue,
+        ranges: Vec<vk::ImageSubresourceRange>,
+    },
+    ClearAttachments {
+        attachments: Vec<vk::ClearAttachment>,
+        rects: Vec<vk::ClearRect>,
+    },
+    CopyImageToBuffer {
+        src_image: vk::Image,
+        src_image_layout: vk::ImageLayout,
+        dst_buffer: vk::Buffer,
+        regions: Vec<vk::BufferImageCopy>,
+    },
+    CopyImage {
+        src_image: vk::Image,
+        src_image_layout: vk::ImageLayout,
+        dst_image: vk::Image,
+        dst_image_layout: vk::ImageLayout,
+        regions: Vec<vk::ImageCopy>,
+    },
+    BlitImage {
+        src_image: vk::Image,
+        src_image_layout: vk::ImageLayout,
+        dst_image: vk::Image,
+        dst_image_layout: vk::ImageLayout,
+        regions: Vec<vk::ImageBlit>,
+        filter: vk::Filter,
+    },
 }
 
 pub unsafe fn allocate_command_buffers(
@@ -561,6 +613,321 @@ pub unsafe fn cmd_push_constants(
         });
 }
 
+pub unsafe fn cmd_set_viewport(
+    command_buffer: vk::CommandBuffer,
+    first_viewport: u32,
+    viewport_count: u32,
+    p_viewports: *const vk::Viewport,
+) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!(
+        "Recording SetViewport: first={}, count={}",
+        first_viewport, viewport_count
+    );
+
+    let viewports = if viewport_count > 0 {
+        std::slice::from_raw_parts(p_viewports, viewport_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::SetViewport {
+            first_viewport,
+            viewports,
+        });
+}
+
+pub unsafe fn cmd_set_scissor(
+    command_buffer: vk::CommandBuffer,
+    first_scissor: u32,
+    scissor_count: u32,
+    p_scissors: *const vk::Rect2D,
+) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!(
+        "Recording SetScissor: first={}, count={}",
+        first_scissor, scissor_count
+    );
+
+    let scissors = if scissor_count > 0 {
+        std::slice::from_raw_parts(p_scissors, scissor_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data.commands.write().push(RecordedCommand::SetScissor {
+        first_scissor,
+        scissors,
+    });
+}
+
+pub unsafe fn cmd_set_blend_constants(
+    command_buffer: vk::CommandBuffer,
+    blend_constants: *const [f32; 4],
+) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!("Recording SetBlendConstants");
+
+    let blend_constants_array = if !blend_constants.is_null() {
+        *blend_constants
+    } else {
+        [0.0, 0.0, 0.0, 0.0]
+    };
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::SetBlendConstants {
+            blend_constants: blend_constants_array,
+        });
+}
+
+pub unsafe fn cmd_set_stencil_reference(
+    command_buffer: vk::CommandBuffer,
+    face_mask: vk::StencilFaceFlags,
+    reference: u32,
+) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!(
+        "Recording SetStencilReference: mask={:?}, ref={}",
+        face_mask, reference
+    );
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::SetStencilReference {
+            face_mask,
+            reference,
+        });
+}
+
+pub unsafe fn cmd_clear_color_image(
+    command_buffer: vk::CommandBuffer,
+    image: vk::Image,
+    image_layout: vk::ImageLayout,
+    p_color: *const vk::ClearColorValue,
+    range_count: u32,
+    p_ranges: *const vk::ImageSubresourceRange,
+) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!("Recording ClearColorImage: {} ranges", range_count);
+
+    let color = if !p_color.is_null() {
+        *p_color
+    } else {
+        vk::ClearColorValue::default()
+    };
+
+    let ranges = if range_count > 0 {
+        std::slice::from_raw_parts(p_ranges, range_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::ClearColorImage {
+            image,
+            image_layout,
+            color,
+            ranges,
+        });
+}
+
+pub unsafe fn cmd_clear_depth_stencil_image(
+    command_buffer: vk::CommandBuffer,
+    image: vk::Image,
+    image_layout: vk::ImageLayout,
+    p_depth_stencil: *const vk::ClearDepthStencilValue,
+    range_count: u32,
+    p_ranges: *const vk::ImageSubresourceRange,
+) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!("Recording ClearDepthStencilImage: {} ranges", range_count);
+
+    let depth_stencil = if !p_depth_stencil.is_null() {
+        *p_depth_stencil
+    } else {
+        vk::ClearDepthStencilValue::default()
+    };
+
+    let ranges = if range_count > 0 {
+        std::slice::from_raw_parts(p_ranges, range_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::ClearDepthStencilImage {
+            image,
+            image_layout,
+            depth_stencil,
+            ranges,
+        });
+}
+
+pub unsafe fn cmd_clear_attachments(
+    command_buffer: vk::CommandBuffer,
+    attachment_count: u32,
+    p_attachments: *const vk::ClearAttachment,
+    rect_count: u32,
+    p_rects: *const vk::ClearRect,
+) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!(
+        "Recording ClearAttachments: {} attachments, {} rects",
+        attachment_count, rect_count
+    );
+
+    let attachments = if attachment_count > 0 {
+        std::slice::from_raw_parts(p_attachments, attachment_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let rects = if rect_count > 0 {
+        std::slice::from_raw_parts(p_rects, rect_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::ClearAttachments { attachments, rects });
+}
+
+pub unsafe fn cmd_copy_image_to_buffer(
+    command_buffer: vk::CommandBuffer,
+    src_image: vk::Image,
+    src_image_layout: vk::ImageLayout,
+    dst_buffer: vk::Buffer,
+    region_count: u32,
+    p_regions: *const vk::BufferImageCopy,
+) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!("Recording CopyImageToBuffer: {} regions", region_count);
+
+    let regions = if region_count > 0 {
+        std::slice::from_raw_parts(p_regions, region_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::CopyImageToBuffer {
+            src_image,
+            src_image_layout,
+            dst_buffer,
+            regions,
+        });
+}
+
+pub unsafe fn cmd_copy_image(
+    command_buffer: vk::CommandBuffer,
+    src_image: vk::Image,
+    src_image_layout: vk::ImageLayout,
+    dst_image: vk::Image,
+    dst_image_layout: vk::ImageLayout,
+    region_count: u32,
+    p_regions: *const vk::ImageCopy,
+) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!("Recording CopyImage: {} regions", region_count);
+
+    let regions = if region_count > 0 {
+        std::slice::from_raw_parts(p_regions, region_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data.commands.write().push(RecordedCommand::CopyImage {
+        src_image,
+        src_image_layout,
+        dst_image,
+        dst_image_layout,
+        regions,
+    });
+}
+
+pub unsafe fn cmd_blit_image(
+    command_buffer: vk::CommandBuffer,
+    src_image: vk::Image,
+    src_image_layout: vk::ImageLayout,
+    dst_image: vk::Image,
+    dst_image_layout: vk::ImageLayout,
+    region_count: u32,
+    p_regions: *const vk::ImageBlit,
+    filter: vk::Filter,
+) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!("Recording BlitImage: {} regions", region_count);
+
+    let regions = if region_count > 0 {
+        std::slice::from_raw_parts(p_regions, region_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data.commands.write().push(RecordedCommand::BlitImage {
+        src_image,
+        src_image_layout,
+        dst_image,
+        dst_image_layout,
+        regions,
+        filter,
+    });
+}
+
 pub fn get_command_buffer_data(
     command_buffer: vk::CommandBuffer,
 ) -> Option<Arc<VkCommandBufferData>> {
@@ -608,6 +975,12 @@ pub fn replay_commands(
 
     // Push constant bind group (created once, used for all draws with dynamic offset)
     let mut push_constant_bind_group: Option<Arc<wgpu::BindGroup>> = None;
+
+    // Dynamic state tracking
+    let mut current_viewports: Vec<vk::Viewport> = Vec::new();
+    let mut current_scissors: Vec<vk::Rect2D> = Vec::new();
+    let mut current_blend_constants: Option<[f32; 4]> = None;
+    let mut current_stencil_reference: Option<u32> = None;
 
     // Get device data for push constant buffer access
     let device_data = crate::device::get_device_data(cmd_data.device)
@@ -1017,6 +1390,42 @@ pub fn replay_commands(
                 );
 
                 if let Some(ref mut pass) = active_render_pass {
+                    // Apply dynamic state before draw
+                    if !current_viewports.is_empty() {
+                        let vp = &current_viewports[0];
+                        pass.set_viewport(
+                            vp.x,
+                            vp.y,
+                            vp.width,
+                            vp.height,
+                            vp.min_depth,
+                            vp.max_depth,
+                        );
+                    }
+
+                    if !current_scissors.is_empty() {
+                        let sc = &current_scissors[0];
+                        pass.set_scissor_rect(
+                            sc.offset.x as u32,
+                            sc.offset.y as u32,
+                            sc.extent.width,
+                            sc.extent.height,
+                        );
+                    }
+
+                    if let Some(bc) = current_blend_constants {
+                        pass.set_blend_constant(wgpu::Color {
+                            r: bc[0] as f64,
+                            g: bc[1] as f64,
+                            b: bc[2] as f64,
+                            a: bc[3] as f64,
+                        });
+                    }
+
+                    if let Some(stencil_ref) = current_stencil_reference {
+                        pass.set_stencil_reference(stencil_ref);
+                    }
+
                     // Bind push constants if pending
                     if let (Some(ref bg), Some(offset)) =
                         (&push_constant_bind_group, pending_push_constant_offset)
@@ -1054,6 +1463,42 @@ pub fn replay_commands(
                 );
 
                 if let Some(ref mut pass) = active_render_pass {
+                    // Apply dynamic state before draw
+                    if !current_viewports.is_empty() {
+                        let vp = &current_viewports[0];
+                        pass.set_viewport(
+                            vp.x,
+                            vp.y,
+                            vp.width,
+                            vp.height,
+                            vp.min_depth,
+                            vp.max_depth,
+                        );
+                    }
+
+                    if !current_scissors.is_empty() {
+                        let sc = &current_scissors[0];
+                        pass.set_scissor_rect(
+                            sc.offset.x as u32,
+                            sc.offset.y as u32,
+                            sc.extent.width,
+                            sc.extent.height,
+                        );
+                    }
+
+                    if let Some(bc) = current_blend_constants {
+                        pass.set_blend_constant(wgpu::Color {
+                            r: bc[0] as f64,
+                            g: bc[1] as f64,
+                            b: bc[2] as f64,
+                            a: bc[3] as f64,
+                        });
+                    }
+
+                    if let Some(stencil_ref) = current_stencil_reference {
+                        pass.set_stencil_reference(stencil_ref);
+                    }
+
                     // Bind push constants if pending
                     if let (Some(ref bg), Some(offset)) =
                         (&push_constant_bind_group, pending_push_constant_offset)
@@ -1242,6 +1687,360 @@ pub fn replay_commands(
                         },
                     );
                 }
+            }
+
+            RecordedCommand::SetViewport {
+                first_viewport,
+                viewports,
+            } => {
+                debug!("Replay: SetViewport");
+                // Store viewport state for application before next draw
+                if *first_viewport == 0 {
+                    current_viewports = viewports.clone();
+                } else {
+                    // Extend viewports array if needed
+                    while current_viewports.len() < *first_viewport as usize {
+                        current_viewports.push(vk::Viewport::default());
+                    }
+                    for (i, vp) in viewports.iter().enumerate() {
+                        let idx = *first_viewport as usize + i;
+                        if idx >= current_viewports.len() {
+                            current_viewports.push(*vp);
+                        } else {
+                            current_viewports[idx] = *vp;
+                        }
+                    }
+                }
+            }
+
+            RecordedCommand::SetScissor {
+                first_scissor,
+                scissors,
+            } => {
+                debug!("Replay: SetScissor");
+                // Store scissor state for application before next draw
+                if *first_scissor == 0 {
+                    current_scissors = scissors.clone();
+                } else {
+                    // Extend scissors array if needed
+                    while current_scissors.len() < *first_scissor as usize {
+                        current_scissors.push(vk::Rect2D::default());
+                    }
+                    for (i, sc) in scissors.iter().enumerate() {
+                        let idx = *first_scissor as usize + i;
+                        if idx >= current_scissors.len() {
+                            current_scissors.push(*sc);
+                        } else {
+                            current_scissors[idx] = *sc;
+                        }
+                    }
+                }
+            }
+
+            RecordedCommand::SetBlendConstants { blend_constants } => {
+                debug!("Replay: SetBlendConstants");
+                current_blend_constants = Some(*blend_constants);
+            }
+
+            RecordedCommand::SetStencilReference {
+                face_mask: _,
+                reference,
+            } => {
+                debug!("Replay: SetStencilReference");
+                current_stencil_reference = Some(*reference);
+            }
+
+            RecordedCommand::ClearColorImage {
+                image,
+                image_layout: _,
+                color,
+                ranges,
+            } => {
+                debug!("Replay: ClearColorImage");
+
+                // Drop any active passes
+                drop(active_render_pass.take());
+                drop(active_compute_pass.take());
+
+                let img_data = match image::get_image_data(*image) {
+                    Some(data) => data,
+                    None => {
+                        debug!("Warning: Invalid image in ClearColorImage");
+                        continue;
+                    }
+                };
+
+                let texture_guard = img_data.wgpu_texture.read();
+                let texture = match texture_guard.as_ref() {
+                    Some(tex) => tex,
+                    None => {
+                        debug!("Warning: Image not bound in ClearColorImage");
+                        continue;
+                    }
+                };
+
+                // Use clear_texture for each range
+                for range in ranges {
+                    for mip in range.base_mip_level..range.base_mip_level + range.level_count {
+                        for layer in
+                            range.base_array_layer..range.base_array_layer + range.layer_count
+                        {
+                            // Extract color values
+                            let clear_color = unsafe { color.float32 };
+                            let clear_value = wgpu::Color {
+                                r: clear_color[0] as f64,
+                                g: clear_color[1] as f64,
+                                b: clear_color[2] as f64,
+                                a: clear_color[3] as f64,
+                            };
+
+                            // Create temporary texture view for this mip/layer
+                            let view = texture.as_ref().create_view(&wgpu::TextureViewDescriptor {
+                                label: Some("Clear temp view"),
+                                format: None,
+                                dimension: None,
+                                aspect: wgpu::TextureAspect::All,
+                                base_mip_level: mip,
+                                mip_level_count: Some(1),
+                                base_array_layer: layer,
+                                array_layer_count: Some(1),
+                            });
+
+                            // Use a render pass with LoadOp::Clear
+                            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("Clear color image"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(clear_value),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+                            drop(pass); // End pass immediately
+                        }
+                    }
+                }
+            }
+
+            RecordedCommand::ClearDepthStencilImage {
+                image,
+                image_layout: _,
+                depth_stencil,
+                ranges,
+            } => {
+                debug!("Replay: ClearDepthStencilImage");
+
+                // Drop any active passes
+                drop(active_render_pass.take());
+                drop(active_compute_pass.take());
+
+                let img_data = match image::get_image_data(*image) {
+                    Some(data) => data,
+                    None => {
+                        debug!("Warning: Invalid image in ClearDepthStencilImage");
+                        continue;
+                    }
+                };
+
+                let texture_guard = img_data.wgpu_texture.read();
+                let texture = match texture_guard.as_ref() {
+                    Some(tex) => tex,
+                    None => {
+                        debug!("Warning: Image not bound in ClearDepthStencilImage");
+                        continue;
+                    }
+                };
+
+                // Use clear_texture for each range
+                for range in ranges {
+                    for mip in range.base_mip_level..range.base_mip_level + range.level_count {
+                        for layer in
+                            range.base_array_layer..range.base_array_layer + range.layer_count
+                        {
+                            let view = texture.as_ref().create_view(&wgpu::TextureViewDescriptor {
+                                label: Some("Clear temp view"),
+                                format: None,
+                                dimension: None,
+                                aspect: wgpu::TextureAspect::All,
+                                base_mip_level: mip,
+                                mip_level_count: Some(1),
+                                base_array_layer: layer,
+                                array_layer_count: Some(1),
+                            });
+
+                            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("Clear depth stencil image"),
+                                color_attachments: &[],
+                                depth_stencil_attachment: Some(
+                                    wgpu::RenderPassDepthStencilAttachment {
+                                        view: &view,
+                                        depth_ops: Some(wgpu::Operations {
+                                            load: wgpu::LoadOp::Clear(depth_stencil.depth),
+                                            store: wgpu::StoreOp::Store,
+                                        }),
+                                        stencil_ops: Some(wgpu::Operations {
+                                            load: wgpu::LoadOp::Clear(depth_stencil.stencil),
+                                            store: wgpu::StoreOp::Store,
+                                        }),
+                                    },
+                                ),
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+                            drop(pass);
+                        }
+                    }
+                }
+            }
+
+            RecordedCommand::ClearAttachments {
+                attachments: _,
+                rects: _,
+            } => {
+                debug!("Replay: ClearAttachments (not supported - use LoadOp::Clear instead)");
+                // WebGPU doesn't support clearing attachments inside a render pass
+                // This should be handled by LoadOp::Clear in BeginRenderPass
+                // Log warning and skip
+            }
+
+            RecordedCommand::CopyImageToBuffer {
+                src_image,
+                src_image_layout: _,
+                dst_buffer,
+                regions,
+            } => {
+                debug!("Replay: CopyImageToBuffer");
+
+                // Drop any active passes
+                drop(active_render_pass.take());
+                drop(active_compute_pass.take());
+
+                let src_data = image::get_image_data(*src_image)
+                    .ok_or_else(|| VkError::InvalidHandle("Invalid source image".to_string()))?;
+                let dst_data = buffer::get_buffer_data(*dst_buffer).ok_or_else(|| {
+                    VkError::InvalidHandle("Invalid destination buffer".to_string())
+                })?;
+
+                let src_wgpu_guard = src_data.wgpu_texture.read();
+                let dst_wgpu_guard = dst_data.wgpu_buffer.read();
+
+                let src_wgpu = src_wgpu_guard
+                    .as_ref()
+                    .ok_or_else(|| VkError::InvalidHandle("Source image not bound".to_string()))?;
+                let dst_wgpu = dst_wgpu_guard.as_ref().ok_or_else(|| {
+                    VkError::InvalidHandle("Destination buffer not bound".to_string())
+                })?;
+
+                for region in regions {
+                    let bytes_per_pixel = crate::format::format_size(src_data.format)
+                        .ok_or_else(|| VkError::FormatNotSupported)?;
+                    let bytes_per_row = region.image_extent.width * bytes_per_pixel;
+
+                    encoder.copy_texture_to_buffer(
+                        wgpu::ImageCopyTexture {
+                            texture: src_wgpu.as_ref(),
+                            mip_level: region.image_subresource.mip_level,
+                            origin: wgpu::Origin3d {
+                                x: region.image_offset.x as u32,
+                                y: region.image_offset.y as u32,
+                                z: region.image_offset.z as u32,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::ImageCopyBuffer {
+                            buffer: dst_wgpu.as_ref(),
+                            layout: wgpu::ImageDataLayout {
+                                offset: region.buffer_offset,
+                                bytes_per_row: Some(bytes_per_row),
+                                rows_per_image: Some(region.image_extent.height),
+                            },
+                        },
+                        wgpu::Extent3d {
+                            width: region.image_extent.width,
+                            height: region.image_extent.height,
+                            depth_or_array_layers: region.image_extent.depth,
+                        },
+                    );
+                }
+            }
+
+            RecordedCommand::CopyImage {
+                src_image,
+                src_image_layout: _,
+                dst_image,
+                dst_image_layout: _,
+                regions,
+            } => {
+                debug!("Replay: CopyImage");
+
+                // Drop any active passes
+                drop(active_render_pass.take());
+                drop(active_compute_pass.take());
+
+                let src_data = image::get_image_data(*src_image)
+                    .ok_or_else(|| VkError::InvalidHandle("Invalid source image".to_string()))?;
+                let dst_data = image::get_image_data(*dst_image).ok_or_else(|| {
+                    VkError::InvalidHandle("Invalid destination image".to_string())
+                })?;
+
+                let src_wgpu_guard = src_data.wgpu_texture.read();
+                let dst_wgpu_guard = dst_data.wgpu_texture.read();
+
+                let src_wgpu = src_wgpu_guard
+                    .as_ref()
+                    .ok_or_else(|| VkError::InvalidHandle("Source image not bound".to_string()))?;
+                let dst_wgpu = dst_wgpu_guard.as_ref().ok_or_else(|| {
+                    VkError::InvalidHandle("Destination image not bound".to_string())
+                })?;
+
+                for region in regions {
+                    encoder.copy_texture_to_texture(
+                        wgpu::ImageCopyTexture {
+                            texture: src_wgpu.as_ref(),
+                            mip_level: region.src_subresource.mip_level,
+                            origin: wgpu::Origin3d {
+                                x: region.src_offset.x as u32,
+                                y: region.src_offset.y as u32,
+                                z: region.src_offset.z as u32,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::ImageCopyTexture {
+                            texture: dst_wgpu.as_ref(),
+                            mip_level: region.dst_subresource.mip_level,
+                            origin: wgpu::Origin3d {
+                                x: region.dst_offset.x as u32,
+                                y: region.dst_offset.y as u32,
+                                z: region.dst_offset.z as u32,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::Extent3d {
+                            width: region.extent.width,
+                            height: region.extent.height,
+                            depth_or_array_layers: region.extent.depth,
+                        },
+                    );
+                }
+            }
+
+            RecordedCommand::BlitImage {
+                src_image: _,
+                src_image_layout: _,
+                dst_image: _,
+                dst_image_layout: _,
+                regions: _,
+                filter: _,
+            } => {
+                debug!("Replay: BlitImage (not fully implemented - would require compute shader)");
+                // WebGPU doesn't have direct blit support
+                // This would need to be implemented via a compute shader or render pass
+                // For now, log and skip - most uses are covered by CopyImage
             }
 
             RecordedCommand::PipelineBarrier { .. } => {

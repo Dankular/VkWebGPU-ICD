@@ -411,6 +411,34 @@ pub unsafe extern "system" fn vkGetDeviceProcAddr(
         }
         b"vkCmdDispatch" => std::mem::transmute(vkCmdDispatch as vk::PFN_vkCmdDispatch),
 
+        // Dynamic state commands
+        b"vkCmdSetViewport" => std::mem::transmute(vkCmdSetViewport as vk::PFN_vkCmdSetViewport),
+        b"vkCmdSetScissor" => std::mem::transmute(vkCmdSetScissor as vk::PFN_vkCmdSetScissor),
+        b"vkCmdSetBlendConstants" => {
+            std::mem::transmute(vkCmdSetBlendConstants as vk::PFN_vkCmdSetBlendConstants)
+        }
+        b"vkCmdSetStencilReference" => {
+            std::mem::transmute(vkCmdSetStencilReference as vk::PFN_vkCmdSetStencilReference)
+        }
+
+        // Clear commands
+        b"vkCmdClearColorImage" => {
+            std::mem::transmute(vkCmdClearColorImage as vk::PFN_vkCmdClearColorImage)
+        }
+        b"vkCmdClearDepthStencilImage" => {
+            std::mem::transmute(vkCmdClearDepthStencilImage as vk::PFN_vkCmdClearDepthStencilImage)
+        }
+        b"vkCmdClearAttachments" => {
+            std::mem::transmute(vkCmdClearAttachments as vk::PFN_vkCmdClearAttachments)
+        }
+
+        // Copy commands
+        b"vkCmdCopyImage" => std::mem::transmute(vkCmdCopyImage as vk::PFN_vkCmdCopyImage),
+        b"vkCmdCopyImageToBuffer" => {
+            std::mem::transmute(vkCmdCopyImageToBuffer as vk::PFN_vkCmdCopyImageToBuffer)
+        }
+        b"vkCmdBlitImage" => std::mem::transmute(vkCmdBlitImage as vk::PFN_vkCmdBlitImage),
+
         // Queue operations
         b"vkQueueSubmit" => std::mem::transmute(vkQueueSubmit as vk::PFN_vkQueueSubmit),
         b"vkQueueWaitIdle" => std::mem::transmute(vkQueueWaitIdle as vk::PFN_vkQueueWaitIdle),
@@ -1341,4 +1369,175 @@ pub unsafe extern "system" fn vkQueuePresentKHR(
         Ok(_) => vk::Result::SUCCESS,
         Err(e) => e.to_vk_result(),
     }
+}
+
+// Dynamic state commands
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetViewport(
+    command_buffer: vk::CommandBuffer,
+    first_viewport: u32,
+    viewport_count: u32,
+    p_viewports: *const vk::Viewport,
+) {
+    crate::command_buffer::cmd_set_viewport(
+        command_buffer,
+        first_viewport,
+        viewport_count,
+        p_viewports,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetScissor(
+    command_buffer: vk::CommandBuffer,
+    first_scissor: u32,
+    scissor_count: u32,
+    p_scissors: *const vk::Rect2D,
+) {
+    crate::command_buffer::cmd_set_scissor(
+        command_buffer,
+        first_scissor,
+        scissor_count,
+        p_scissors,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetBlendConstants(
+    command_buffer: vk::CommandBuffer,
+    blend_constants: *const [f32; 4],
+) {
+    crate::command_buffer::cmd_set_blend_constants(command_buffer, blend_constants);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdSetStencilReference(
+    command_buffer: vk::CommandBuffer,
+    face_mask: vk::StencilFaceFlags,
+    reference: u32,
+) {
+    crate::command_buffer::cmd_set_stencil_reference(command_buffer, face_mask, reference);
+}
+
+// Clear commands
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdClearColorImage(
+    command_buffer: vk::CommandBuffer,
+    image: vk::Image,
+    image_layout: vk::ImageLayout,
+    p_color: *const vk::ClearColorValue,
+    range_count: u32,
+    p_ranges: *const vk::ImageSubresourceRange,
+) {
+    crate::command_buffer::cmd_clear_color_image(
+        command_buffer,
+        image,
+        image_layout,
+        p_color,
+        range_count,
+        p_ranges,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdClearDepthStencilImage(
+    command_buffer: vk::CommandBuffer,
+    image: vk::Image,
+    image_layout: vk::ImageLayout,
+    p_depth_stencil: *const vk::ClearDepthStencilValue,
+    range_count: u32,
+    p_ranges: *const vk::ImageSubresourceRange,
+) {
+    crate::command_buffer::cmd_clear_depth_stencil_image(
+        command_buffer,
+        image,
+        image_layout,
+        p_depth_stencil,
+        range_count,
+        p_ranges,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdClearAttachments(
+    command_buffer: vk::CommandBuffer,
+    attachment_count: u32,
+    p_attachments: *const vk::ClearAttachment,
+    rect_count: u32,
+    p_rects: *const vk::ClearRect,
+) {
+    crate::command_buffer::cmd_clear_attachments(
+        command_buffer,
+        attachment_count,
+        p_attachments,
+        rect_count,
+        p_rects,
+    );
+}
+
+// Copy commands
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdCopyImage(
+    command_buffer: vk::CommandBuffer,
+    src_image: vk::Image,
+    src_image_layout: vk::ImageLayout,
+    dst_image: vk::Image,
+    dst_image_layout: vk::ImageLayout,
+    region_count: u32,
+    p_regions: *const vk::ImageCopy,
+) {
+    crate::command_buffer::cmd_copy_image(
+        command_buffer,
+        src_image,
+        src_image_layout,
+        dst_image,
+        dst_image_layout,
+        region_count,
+        p_regions,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdCopyImageToBuffer(
+    command_buffer: vk::CommandBuffer,
+    src_image: vk::Image,
+    src_image_layout: vk::ImageLayout,
+    dst_buffer: vk::Buffer,
+    region_count: u32,
+    p_regions: *const vk::BufferImageCopy,
+) {
+    crate::command_buffer::cmd_copy_image_to_buffer(
+        command_buffer,
+        src_image,
+        src_image_layout,
+        dst_buffer,
+        region_count,
+        p_regions,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdBlitImage(
+    command_buffer: vk::CommandBuffer,
+    src_image: vk::Image,
+    src_image_layout: vk::ImageLayout,
+    dst_image: vk::Image,
+    dst_image_layout: vk::ImageLayout,
+    region_count: u32,
+    p_regions: *const vk::ImageBlit,
+    filter: vk::Filter,
+) {
+    crate::command_buffer::cmd_blit_image(
+        command_buffer,
+        src_image,
+        src_image_layout,
+        dst_image,
+        dst_image_layout,
+        region_count,
+        p_regions,
+        filter,
+    );
 }
