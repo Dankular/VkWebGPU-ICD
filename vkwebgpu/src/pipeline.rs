@@ -303,21 +303,168 @@ unsafe fn create_wgpu_render_pipeline(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn process_vertex_input_state(
-    _vis: &vk::PipelineVertexInputStateCreateInfo,
+    vis: &vk::PipelineVertexInputStateCreateInfo,
 ) -> Vec<wgpu::VertexBufferLayout<'static>> {
-    // Simplified: return empty for now
-    Vec::new()
+    if vis.vertex_binding_description_count == 0 {
+        return Vec::new();
+    }
+
+    let bindings = unsafe {
+        std::slice::from_raw_parts(
+            vis.p_vertex_binding_descriptions,
+            vis.vertex_binding_description_count as usize,
+        )
+    };
+
+    let attributes = unsafe {
+        std::slice::from_raw_parts(
+            vis.p_vertex_attribute_descriptions,
+            vis.vertex_attribute_description_count as usize,
+        )
+    };
+
+    bindings
+        .iter()
+        .map(|binding| {
+            let binding_attrs: Vec<wgpu::VertexAttribute> = attributes
+                .iter()
+                .filter(|attr| attr.binding == binding.binding)
+                .map(|attr| wgpu::VertexAttribute {
+                    format: vk_to_wgpu_vertex_format(attr.format),
+                    offset: attr.offset as u64,
+                    shader_location: attr.location,
+                })
+                .collect();
+
+            wgpu::VertexBufferLayout {
+                array_stride: binding.stride as u64,
+                step_mode: if binding.input_rate == vk::VertexInputRate::VERTEX {
+                    wgpu::VertexStepMode::Vertex
+                } else {
+                    wgpu::VertexStepMode::Instance
+                },
+                attributes: Box::leak(binding_attrs.into_boxed_slice()),
+            }
+        })
+        .collect()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn process_color_blend_state(
-    _cbs: &vk::PipelineColorBlendStateCreateInfo,
+    cbs: &vk::PipelineColorBlendStateCreateInfo,
 ) -> Vec<Option<wgpu::ColorTargetState>> {
-    vec![Some(wgpu::ColorTargetState {
-        format: wgpu::TextureFormat::Bgra8Unorm,
-        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-        write_mask: wgpu::ColorWrites::ALL,
-    })]
+    if cbs.attachment_count == 0 {
+        return vec![Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+    }
+
+    let attachments =
+        unsafe { std::slice::from_raw_parts(cbs.p_attachments, cbs.attachment_count as usize) };
+
+    attachments
+        .iter()
+        .map(|attachment| {
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Bgra8Unorm, // TODO: Get from render pass
+                blend: if attachment.blend_enable == vk::TRUE {
+                    Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: vk_to_wgpu_blend_factor(attachment.src_color_blend_factor),
+                            dst_factor: vk_to_wgpu_blend_factor(attachment.dst_color_blend_factor),
+                            operation: vk_to_wgpu_blend_operation(attachment.color_blend_op),
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: vk_to_wgpu_blend_factor(attachment.src_alpha_blend_factor),
+                            dst_factor: vk_to_wgpu_blend_factor(attachment.dst_alpha_blend_factor),
+                            operation: vk_to_wgpu_blend_operation(attachment.alpha_blend_op),
+                        },
+                    })
+                } else {
+                    None
+                },
+                write_mask: vk_to_wgpu_color_write_mask(attachment.color_write_mask),
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn vk_to_wgpu_vertex_format(format: vk::Format) -> wgpu::VertexFormat {
+    match format {
+        vk::Format::R32_SFLOAT => wgpu::VertexFormat::Float32,
+        vk::Format::R32G32_SFLOAT => wgpu::VertexFormat::Float32x2,
+        vk::Format::R32G32B32_SFLOAT => wgpu::VertexFormat::Float32x3,
+        vk::Format::R32G32B32A32_SFLOAT => wgpu::VertexFormat::Float32x4,
+        vk::Format::R32_SINT => wgpu::VertexFormat::Sint32,
+        vk::Format::R32G32_SINT => wgpu::VertexFormat::Sint32x2,
+        vk::Format::R32G32B32_SINT => wgpu::VertexFormat::Sint32x3,
+        vk::Format::R32G32B32A32_SINT => wgpu::VertexFormat::Sint32x4,
+        vk::Format::R32_UINT => wgpu::VertexFormat::Uint32,
+        vk::Format::R32G32_UINT => wgpu::VertexFormat::Uint32x2,
+        vk::Format::R32G32B32_UINT => wgpu::VertexFormat::Uint32x3,
+        vk::Format::R32G32B32A32_UINT => wgpu::VertexFormat::Uint32x4,
+        vk::Format::R16G16_SINT => wgpu::VertexFormat::Sint16x2,
+        vk::Format::R16G16B16A16_SINT => wgpu::VertexFormat::Sint16x4,
+        vk::Format::R16G16_UINT => wgpu::VertexFormat::Uint16x2,
+        vk::Format::R16G16B16A16_UINT => wgpu::VertexFormat::Uint16x4,
+        vk::Format::R8G8_SINT => wgpu::VertexFormat::Sint8x2,
+        vk::Format::R8G8B8A8_SINT => wgpu::VertexFormat::Sint8x4,
+        vk::Format::R8G8_UINT => wgpu::VertexFormat::Uint8x2,
+        vk::Format::R8G8B8A8_UINT => wgpu::VertexFormat::Uint8x4,
+        _ => wgpu::VertexFormat::Float32x3, // Default
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn vk_to_wgpu_blend_factor(factor: vk::BlendFactor) -> wgpu::BlendFactor {
+    match factor {
+        vk::BlendFactor::ZERO => wgpu::BlendFactor::Zero,
+        vk::BlendFactor::ONE => wgpu::BlendFactor::One,
+        vk::BlendFactor::SRC_COLOR => wgpu::BlendFactor::Src,
+        vk::BlendFactor::ONE_MINUS_SRC_COLOR => wgpu::BlendFactor::OneMinusSrc,
+        vk::BlendFactor::DST_COLOR => wgpu::BlendFactor::Dst,
+        vk::BlendFactor::ONE_MINUS_DST_COLOR => wgpu::BlendFactor::OneMinusDst,
+        vk::BlendFactor::SRC_ALPHA => wgpu::BlendFactor::SrcAlpha,
+        vk::BlendFactor::ONE_MINUS_SRC_ALPHA => wgpu::BlendFactor::OneMinusSrcAlpha,
+        vk::BlendFactor::DST_ALPHA => wgpu::BlendFactor::DstAlpha,
+        vk::BlendFactor::ONE_MINUS_DST_ALPHA => wgpu::BlendFactor::OneMinusDstAlpha,
+        vk::BlendFactor::CONSTANT_COLOR => wgpu::BlendFactor::Constant,
+        vk::BlendFactor::ONE_MINUS_CONSTANT_COLOR => wgpu::BlendFactor::OneMinusConstant,
+        _ => wgpu::BlendFactor::One,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn vk_to_wgpu_blend_operation(op: vk::BlendOp) -> wgpu::BlendOperation {
+    match op {
+        vk::BlendOp::ADD => wgpu::BlendOperation::Add,
+        vk::BlendOp::SUBTRACT => wgpu::BlendOperation::Subtract,
+        vk::BlendOp::REVERSE_SUBTRACT => wgpu::BlendOperation::ReverseSubtract,
+        vk::BlendOp::MIN => wgpu::BlendOperation::Min,
+        vk::BlendOp::MAX => wgpu::BlendOperation::Max,
+        _ => wgpu::BlendOperation::Add,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn vk_to_wgpu_color_write_mask(mask: vk::ColorComponentFlags) -> wgpu::ColorWrites {
+    let mut writes = wgpu::ColorWrites::empty();
+    if mask.contains(vk::ColorComponentFlags::R) {
+        writes |= wgpu::ColorWrites::RED;
+    }
+    if mask.contains(vk::ColorComponentFlags::G) {
+        writes |= wgpu::ColorWrites::GREEN;
+    }
+    if mask.contains(vk::ColorComponentFlags::B) {
+        writes |= wgpu::ColorWrites::BLUE;
+    }
+    if mask.contains(vk::ColorComponentFlags::A) {
+        writes |= wgpu::ColorWrites::ALPHA;
+    }
+    writes
 }
 
 #[cfg(not(target_arch = "wasm32"))]
