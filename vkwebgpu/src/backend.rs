@@ -102,8 +102,10 @@ impl WebGPUBackend {
         });
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower, // Try low power first
-            force_fallback_adapter: true, // Force WARP software renderer
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            // Do NOT force fallback: DX12/Metal backends already prevent Vulkan recursion.
+            // WARP is ~100x slower than a real GPU and would make rendering useless.
+            force_fallback_adapter: false,
             compatible_surface: None,
         }))
         .ok_or(VkError::AdapterNotAvailable)?;

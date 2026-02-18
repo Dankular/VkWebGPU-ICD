@@ -2432,8 +2432,6 @@ pub fn replay_commands(
                 regions,
             } => {
                 debug!("Replay: CopyBufferToImage");
-
-                // Drop any active passes
                 drop(active_render_pass.take());
                 drop(active_compute_pass.take());
 
@@ -2443,47 +2441,124 @@ pub fn replay_commands(
                     VkError::InvalidHandle("Invalid destination image".to_string())
                 })?;
 
-                let src_wgpu_guard = src_data.wgpu_buffer.read();
                 let dst_wgpu_guard = dst_data.wgpu_texture.read();
-
-                let src_wgpu = src_wgpu_guard
-                    .as_ref()
-                    .ok_or_else(|| VkError::InvalidHandle("Source buffer not bound".to_string()))?;
                 let dst_wgpu = dst_wgpu_guard.as_ref().ok_or_else(|| {
                     VkError::InvalidHandle("Destination image not bound".to_string())
                 })?;
 
                 for region in regions {
-                    // Calculate proper bytes_per_row from format
                     let bytes_per_pixel = crate::format::format_size(dst_data.format)
                         .ok_or_else(|| VkError::FormatNotSupported)?;
-                    let bytes_per_row = region.image_extent.width * bytes_per_pixel;
 
-                    encoder.copy_buffer_to_texture(
-                        wgpu::ImageCopyBuffer {
-                            buffer: src_wgpu.as_ref(),
-                            layout: wgpu::ImageDataLayout {
-                                offset: region.buffer_offset,
-                                bytes_per_row: Some(bytes_per_row),
-                                rows_per_image: Some(region.image_extent.height),
+                    // buffer_row_length==0 means tightly packed (use image width).
+                    let row_px = if region.buffer_row_length == 0 {
+                        region.image_extent.width
+                    } else {
+                        region.buffer_row_length
+                    };
+                    let actual_bpr = row_px * bytes_per_pixel;
+                    // wgpu requires bytes_per_row to be a multiple of 256.
+                    let aligned_bpr = (actual_bpr + 255) & !255;
+
+                    let img_height = if region.buffer_image_height == 0 {
+                        region.image_extent.height
+                    } else {
+                        region.buffer_image_height
+                    };
+                    let depth = region.image_extent.depth.max(1);
+
+                    let dst_tex = wgpu::ImageCopyTexture {
+                        texture: dst_wgpu.as_ref(),
+                        mip_level: region.image_subresource.mip_level,
+                        origin: wgpu::Origin3d {
+                            x: region.image_offset.x as u32,
+                            y: region.image_offset.y as u32,
+                            z: region.image_offset.z as u32,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    };
+                    let copy_size = wgpu::Extent3d {
+                        width: region.image_extent.width,
+                        height: region.image_extent.height,
+                        depth_or_array_layers: depth,
+                    };
+
+                    if aligned_bpr == actual_bpr {
+                        // Already 256-aligned; use the source wgpu buffer directly.
+                        let src_guard = src_data.wgpu_buffer.read();
+                        let src_wgpu = src_guard.as_ref().ok_or_else(|| {
+                            VkError::InvalidHandle("Source buffer not bound".to_string())
+                        })?;
+                        encoder.copy_buffer_to_texture(
+                            wgpu::ImageCopyBuffer {
+                                buffer: src_wgpu.as_ref(),
+                                layout: wgpu::ImageDataLayout {
+                                    offset: region.buffer_offset,
+                                    bytes_per_row: Some(aligned_bpr),
+                                    rows_per_image: Some(img_height),
+                                },
                             },
-                        },
-                        wgpu::ImageCopyTexture {
-                            texture: dst_wgpu.as_ref(),
-                            mip_level: region.image_subresource.mip_level,
-                            origin: wgpu::Origin3d {
-                                x: region.image_offset.x as u32,
-                                y: region.image_offset.y as u32,
-                                z: region.image_offset.z as u32,
+                            dst_tex,
+                            copy_size,
+                        );
+                    } else {
+                        // Row pitch is not 256-aligned: re-pack from CPU-side memory.
+                        let total_rows = (img_height * depth) as usize;
+                        let aligned_total = aligned_bpr as usize * total_rows;
+                        let copy_bpr = region.image_extent.width * bytes_per_pixel;
+                        let mut packed = vec![0u8; aligned_total];
+
+                        let mem_guard = src_data.memory.read();
+                        if let Some(mem_h) = mem_guard.as_ref() {
+                            if let Some(mem_data) = crate::memory::get_memory_data(*mem_h) {
+                                let cpu = mem_data.data.read();
+                                let base = *src_data.memory_offset.read() as usize
+                                    + region.buffer_offset as usize;
+                                for row in 0..total_rows {
+                                    let src_off = base + row * actual_bpr as usize;
+                                    let dst_off = row * aligned_bpr as usize;
+                                    let len = copy_bpr as usize;
+                                    if src_off + len <= cpu.len() {
+                                        packed[dst_off..dst_off + len]
+                                            .copy_from_slice(&cpu[src_off..src_off + len]);
+                                    }
+                                }
+                            }
+                        }
+
+                        let staging = backend.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("CopyBufferToImage_aligned"),
+                            size: aligned_total as u64,
+                            usage: wgpu::BufferUsages::COPY_SRC,
+                            mapped_at_creation: false,
+                        });
+                        backend.queue.write_buffer(&staging, 0, &packed);
+                        let staging_arc = Arc::new(staging);
+                        // SAFETY: staging_arc is stored in _resource_refs, keeping
+                        // it alive until after queue.submit().
+                        let staging_ref: &'static wgpu::Buffer =
+                            unsafe { std::mem::transmute(staging_arc.as_ref()) };
+                        _resource_refs
+                            .push(staging_arc as Arc<dyn std::any::Any + Send + Sync>);
+
+                        encoder.copy_buffer_to_texture(
+                            wgpu::ImageCopyBuffer {
+                                buffer: staging_ref,
+                                layout: wgpu::ImageDataLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(aligned_bpr),
+                                    rows_per_image: Some(img_height),
+                                },
                             },
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        wgpu::Extent3d {
-                            width: region.image_extent.width,
-                            height: region.image_extent.height,
-                            depth_or_array_layers: region.image_extent.depth,
-                        },
-                    );
+                            dst_tex,
+                            copy_size,
+                        );
+                        debug!(
+                            "CopyBufferToImage: re-packed {}→{} bytes/row for {}x{} texture",
+                            actual_bpr, aligned_bpr,
+                            region.image_extent.width, region.image_extent.height
+                        );
+                    }
                 }
             }
 
@@ -2737,7 +2812,29 @@ pub fn replay_commands(
                 for region in regions {
                     let bytes_per_pixel = crate::format::format_size(src_data.format)
                         .ok_or_else(|| VkError::FormatNotSupported)?;
-                    let bytes_per_row = region.image_extent.width * bytes_per_pixel;
+
+                    // buffer_row_length==0 means tightly packed (use image width).
+                    let row_px = if region.buffer_row_length == 0 {
+                        region.image_extent.width
+                    } else {
+                        region.buffer_row_length
+                    };
+                    let actual_bpr = row_px * bytes_per_pixel;
+                    // wgpu requires bytes_per_row to be a multiple of 256.
+                    let aligned_bpr = (actual_bpr + 255) & !255;
+
+                    let img_height = if region.buffer_image_height == 0 {
+                        region.image_extent.height
+                    } else {
+                        region.buffer_image_height
+                    };
+
+                    if aligned_bpr != actual_bpr {
+                        debug!(
+                            "CopyImageToBuffer: actual bpr {} not 256-aligned, using {} (output layout has alignment padding)",
+                            actual_bpr, aligned_bpr
+                        );
+                    }
 
                     encoder.copy_texture_to_buffer(
                         wgpu::ImageCopyTexture {
@@ -2754,14 +2851,14 @@ pub fn replay_commands(
                             buffer: dst_wgpu.as_ref(),
                             layout: wgpu::ImageDataLayout {
                                 offset: region.buffer_offset,
-                                bytes_per_row: Some(bytes_per_row),
-                                rows_per_image: Some(region.image_extent.height),
+                                bytes_per_row: Some(aligned_bpr),
+                                rows_per_image: Some(img_height),
                             },
                         },
                         wgpu::Extent3d {
                             width: region.image_extent.width,
                             height: region.image_extent.height,
-                            depth_or_array_layers: region.image_extent.depth,
+                            depth_or_array_layers: region.image_extent.depth.max(1),
                         },
                     );
                 }
@@ -3141,18 +3238,122 @@ pub fn replay_commands(
                     .ok_or_else(|| VkError::InvalidHandle("Invalid source buffer".to_string()))?;
                 let dst_data = image::get_image_data(*dst_image)
                     .ok_or_else(|| VkError::InvalidHandle("Invalid dest image".to_string()))?;
-                let src_guard = src_data.wgpu_buffer.read();
                 let dst_guard = dst_data.wgpu_texture.read();
-                let src_wgpu = src_guard.as_ref().ok_or_else(|| VkError::InvalidHandle("Source buffer not bound".to_string()))?;
-                let dst_wgpu = dst_guard.as_ref().ok_or_else(|| VkError::InvalidHandle("Dest image not bound".to_string()))?;
+                let dst_wgpu = dst_guard.as_ref()
+                    .ok_or_else(|| VkError::InvalidHandle("Dest image not bound".to_string()))?;
+
                 for region in regions {
-                    let bytes_per_pixel = crate::format::format_size(dst_data.format).ok_or_else(|| VkError::FormatNotSupported)?;
-                    let bytes_per_row = region.image_extent.width * bytes_per_pixel;
-                    encoder.copy_buffer_to_texture(
-                        wgpu::ImageCopyBuffer { buffer: src_wgpu.as_ref(), layout: wgpu::ImageDataLayout { offset: region.buffer_offset, bytes_per_row: Some(bytes_per_row), rows_per_image: Some(region.image_extent.height) } },
-                        wgpu::ImageCopyTexture { texture: dst_wgpu.as_ref(), mip_level: region.image_subresource.mip_level, origin: wgpu::Origin3d { x: region.image_offset.x as u32, y: region.image_offset.y as u32, z: region.image_offset.z as u32 }, aspect: wgpu::TextureAspect::All },
-                        wgpu::Extent3d { width: region.image_extent.width, height: region.image_extent.height, depth_or_array_layers: region.image_extent.depth },
-                    );
+                    let bytes_per_pixel = crate::format::format_size(dst_data.format)
+                        .ok_or_else(|| VkError::FormatNotSupported)?;
+
+                    // buffer_row_length==0 means tightly packed (use image width).
+                    let row_px = if region.buffer_row_length == 0 {
+                        region.image_extent.width
+                    } else {
+                        region.buffer_row_length
+                    };
+                    let actual_bpr = row_px * bytes_per_pixel;
+                    // wgpu requires bytes_per_row to be a multiple of 256.
+                    let aligned_bpr = (actual_bpr + 255) & !255;
+
+                    let img_height = if region.buffer_image_height == 0 {
+                        region.image_extent.height
+                    } else {
+                        region.buffer_image_height
+                    };
+                    let depth = region.image_extent.depth.max(1);
+
+                    let dst_tex = wgpu::ImageCopyTexture {
+                        texture: dst_wgpu.as_ref(),
+                        mip_level: region.image_subresource.mip_level,
+                        origin: wgpu::Origin3d {
+                            x: region.image_offset.x as u32,
+                            y: region.image_offset.y as u32,
+                            z: region.image_offset.z as u32,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    };
+                    let copy_size = wgpu::Extent3d {
+                        width: region.image_extent.width,
+                        height: region.image_extent.height,
+                        depth_or_array_layers: depth,
+                    };
+
+                    if aligned_bpr == actual_bpr {
+                        // Already 256-aligned; use the source wgpu buffer directly.
+                        let src_guard = src_data.wgpu_buffer.read();
+                        let src_wgpu = src_guard.as_ref()
+                            .ok_or_else(|| VkError::InvalidHandle("Source buffer not bound".to_string()))?;
+                        encoder.copy_buffer_to_texture(
+                            wgpu::ImageCopyBuffer {
+                                buffer: src_wgpu.as_ref(),
+                                layout: wgpu::ImageDataLayout {
+                                    offset: region.buffer_offset,
+                                    bytes_per_row: Some(aligned_bpr),
+                                    rows_per_image: Some(img_height),
+                                },
+                            },
+                            dst_tex,
+                            copy_size,
+                        );
+                    } else {
+                        // Row pitch not 256-aligned: re-pack from CPU-side memory.
+                        let total_rows = (img_height * depth) as usize;
+                        let aligned_total = aligned_bpr as usize * total_rows;
+                        let copy_bpr = region.image_extent.width * bytes_per_pixel;
+                        let mut packed = vec![0u8; aligned_total];
+
+                        let mem_guard = src_data.memory.read();
+                        if let Some(mem_h) = mem_guard.as_ref() {
+                            if let Some(mem_data) = crate::memory::get_memory_data(*mem_h) {
+                                let cpu = mem_data.data.read();
+                                let base = *src_data.memory_offset.read() as usize
+                                    + region.buffer_offset as usize;
+                                for row in 0..total_rows {
+                                    let src_off = base + row * actual_bpr as usize;
+                                    let dst_off = row * aligned_bpr as usize;
+                                    let len = copy_bpr as usize;
+                                    if src_off + len <= cpu.len() {
+                                        packed[dst_off..dst_off + len]
+                                            .copy_from_slice(&cpu[src_off..src_off + len]);
+                                    }
+                                }
+                            }
+                        }
+
+                        let staging = backend.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("CopyBufferToImage2_aligned"),
+                            size: aligned_total as u64,
+                            usage: wgpu::BufferUsages::COPY_SRC,
+                            mapped_at_creation: false,
+                        });
+                        backend.queue.write_buffer(&staging, 0, &packed);
+                        let staging_arc = Arc::new(staging);
+                        // SAFETY: staging_arc is stored in _resource_refs, keeping
+                        // it alive until after queue.submit().
+                        let staging_ref: &'static wgpu::Buffer =
+                            unsafe { std::mem::transmute(staging_arc.as_ref()) };
+                        _resource_refs
+                            .push(staging_arc as Arc<dyn std::any::Any + Send + Sync>);
+
+                        encoder.copy_buffer_to_texture(
+                            wgpu::ImageCopyBuffer {
+                                buffer: staging_ref,
+                                layout: wgpu::ImageDataLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(aligned_bpr),
+                                    rows_per_image: Some(img_height),
+                                },
+                            },
+                            dst_tex,
+                            copy_size,
+                        );
+                        debug!(
+                            "CopyBufferToImage2: re-packed {}→{} bytes/row for {}x{} texture",
+                            actual_bpr, aligned_bpr,
+                            region.image_extent.width, region.image_extent.height
+                        );
+                    }
                 }
             }
 
@@ -3167,15 +3368,62 @@ pub fn replay_commands(
                     .ok_or_else(|| VkError::InvalidHandle("Invalid dest buffer".to_string()))?;
                 let src_guard = src_data.wgpu_texture.read();
                 let dst_guard = dst_data.wgpu_buffer.read();
-                let src_wgpu = src_guard.as_ref().ok_or_else(|| VkError::InvalidHandle("Source image not bound".to_string()))?;
-                let dst_wgpu = dst_guard.as_ref().ok_or_else(|| VkError::InvalidHandle("Dest buffer not bound".to_string()))?;
+                let src_wgpu = src_guard.as_ref()
+                    .ok_or_else(|| VkError::InvalidHandle("Source image not bound".to_string()))?;
+                let dst_wgpu = dst_guard.as_ref()
+                    .ok_or_else(|| VkError::InvalidHandle("Dest buffer not bound".to_string()))?;
+
                 for region in regions {
-                    let bytes_per_pixel = crate::format::format_size(src_data.format).ok_or_else(|| VkError::FormatNotSupported)?;
-                    let bytes_per_row = region.image_extent.width * bytes_per_pixel;
+                    let bytes_per_pixel = crate::format::format_size(src_data.format)
+                        .ok_or_else(|| VkError::FormatNotSupported)?;
+
+                    // buffer_row_length==0 means tightly packed (use image width).
+                    let row_px = if region.buffer_row_length == 0 {
+                        region.image_extent.width
+                    } else {
+                        region.buffer_row_length
+                    };
+                    let actual_bpr = row_px * bytes_per_pixel;
+                    // wgpu requires bytes_per_row to be a multiple of 256.
+                    let aligned_bpr = (actual_bpr + 255) & !255;
+
+                    let img_height = if region.buffer_image_height == 0 {
+                        region.image_extent.height
+                    } else {
+                        region.buffer_image_height
+                    };
+
+                    if aligned_bpr != actual_bpr {
+                        debug!(
+                            "CopyImageToBuffer2: actual bpr {} not 256-aligned, using {} (output layout has alignment padding)",
+                            actual_bpr, aligned_bpr
+                        );
+                    }
+
                     encoder.copy_texture_to_buffer(
-                        wgpu::ImageCopyTexture { texture: src_wgpu.as_ref(), mip_level: region.image_subresource.mip_level, origin: wgpu::Origin3d { x: region.image_offset.x as u32, y: region.image_offset.y as u32, z: region.image_offset.z as u32 }, aspect: wgpu::TextureAspect::All },
-                        wgpu::ImageCopyBuffer { buffer: dst_wgpu.as_ref(), layout: wgpu::ImageDataLayout { offset: region.buffer_offset, bytes_per_row: Some(bytes_per_row), rows_per_image: Some(region.image_extent.height) } },
-                        wgpu::Extent3d { width: region.image_extent.width, height: region.image_extent.height, depth_or_array_layers: region.image_extent.depth },
+                        wgpu::ImageCopyTexture {
+                            texture: src_wgpu.as_ref(),
+                            mip_level: region.image_subresource.mip_level,
+                            origin: wgpu::Origin3d {
+                                x: region.image_offset.x as u32,
+                                y: region.image_offset.y as u32,
+                                z: region.image_offset.z as u32,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::ImageCopyBuffer {
+                            buffer: dst_wgpu.as_ref(),
+                            layout: wgpu::ImageDataLayout {
+                                offset: region.buffer_offset,
+                                bytes_per_row: Some(aligned_bpr),
+                                rows_per_image: Some(img_height),
+                            },
+                        },
+                        wgpu::Extent3d {
+                            width: region.image_extent.width,
+                            height: region.image_extent.height,
+                            depth_or_array_layers: region.image_extent.depth.max(1),
+                        },
                     );
                 }
             }
