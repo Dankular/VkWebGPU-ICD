@@ -26,6 +26,9 @@ pub unsafe extern "system" fn vk_icdGetInstanceProcAddr(
     match name.to_bytes() {
         b"vkCreateInstance" => std::mem::transmute(vkCreateInstance as vk::PFN_vkCreateInstance),
         b"vkDestroyInstance" => std::mem::transmute(vkDestroyInstance as vk::PFN_vkDestroyInstance),
+        b"vkEnumerateInstanceVersion" => {
+            std::mem::transmute(vkEnumerateInstanceVersion as vk::PFN_vkEnumerateInstanceVersion)
+        }
         b"vkEnumerateInstanceExtensionProperties" => std::mem::transmute(
             vkEnumerateInstanceExtensionProperties
                 as vk::PFN_vkEnumerateInstanceExtensionProperties,
@@ -68,6 +71,16 @@ pub unsafe extern "system" fn vk_icdGetInstanceProcAddr(
 pub unsafe extern "system" fn vk_icdNegotiateLoaderICDInterfaceVersion(
     p_supported_version: *mut u32,
 ) -> vk::Result {
+    // Write to a debug file to confirm this function is called
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("Z:\\vkwebgpu_debug.log")
+    {
+        let _ = writeln!(f, "vk_icdNegotiateLoaderICDInterfaceVersion called");
+    }
+
     if p_supported_version.is_null() {
         return vk::Result::ERROR_INITIALIZATION_FAILED;
     }
@@ -96,17 +109,56 @@ pub unsafe extern "system" fn vk_icdGetPhysicalDeviceProcAddr(
 // Instance functions
 
 #[no_mangle]
+pub unsafe extern "system" fn vkEnumerateInstanceVersion(p_api_version: *mut u32) -> vk::Result {
+    if p_api_version.is_null() {
+        return vk::Result::ERROR_INITIALIZATION_FAILED;
+    }
+
+    // Report Vulkan 1.2 support
+    *p_api_version = vk::API_VERSION_1_2;
+    vk::Result::SUCCESS
+}
+
+#[no_mangle]
 pub unsafe extern "system" fn vkCreateInstance(
     p_create_info: *const vk::InstanceCreateInfo,
     p_allocator: *const vk::AllocationCallbacks,
     p_instance: *mut vk::Instance,
 ) -> vk::Result {
+    // Write to debug file
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("Z:\\vkwebgpu_debug.log")
+    {
+        let _ = writeln!(f, "vkCreateInstance called");
+    }
+
     crate::init();
     info!("vkCreateInstance called");
 
     match crate::instance::create_instance(p_create_info, p_allocator, p_instance) {
-        Ok(_) => vk::Result::SUCCESS,
-        Err(e) => e.to_vk_result(),
+        Ok(_) => {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("Z:\\vkwebgpu_debug.log")
+            {
+                let _ = writeln!(f, "vkCreateInstance SUCCESS");
+            }
+            vk::Result::SUCCESS
+        }
+        Err(e) => {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("Z:\\vkwebgpu_debug.log")
+            {
+                let _ = writeln!(f, "vkCreateInstance FAILED: {:?}", e);
+            }
+            e.to_vk_result()
+        }
     }
 }
 

@@ -91,8 +91,12 @@ pub struct WebGPUBackend {
 impl WebGPUBackend {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new() -> Result<Self> {
+        use log::{info, warn};
+        
+        // CRITICAL: Exclude Vulkan backend to prevent infinite recursion!
+        // Our ICD translates Vulkan->WebGPU, so wgpu must use native backends (DX12, Metal, etc.)
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::DX12 | wgpu::Backends::METAL | wgpu::Backends::GL,
             ..Default::default()
         });
 
@@ -103,21 +107,56 @@ impl WebGPUBackend {
         }))
         .ok_or(VkError::AdapterNotAvailable)?;
 
+        // Log adapter features and limits
+        let adapter_features = adapter.features();
+        let adapter_limits = adapter.limits();
+        info!("WebGPU Adapter: {}", adapter.get_info().name);
+        info!("Available features: {:?}", adapter_features);
+        info!("Adapter limits - max_push_constant_size: {}", adapter_limits.max_push_constant_size);
+
+        // Request only features that are available
+        let mut required_features = wgpu::Features::empty();
+        
+        if adapter_features.contains(wgpu::Features::PUSH_CONSTANTS) {
+            required_features |= wgpu::Features::PUSH_CONSTANTS;
+            info!("PUSH_CONSTANTS supported");
+        } else {
+            warn!("PUSH_CONSTANTS not supported, emulation will be used");
+        }
+        
+        if adapter_features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
+            required_features |= wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        }
+        
+        if adapter_features.contains(wgpu::Features::MULTI_DRAW_INDIRECT) {
+            required_features |= wgpu::Features::MULTI_DRAW_INDIRECT;
+        }
+        
+        if adapter_features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE) {
+            required_features |= wgpu::Features::INDIRECT_FIRST_INSTANCE;
+        }
+
+        // Calculate max push constant size based on adapter limits
+        let max_push_constant_size = if adapter_features.contains(wgpu::Features::PUSH_CONSTANTS) {
+            adapter_limits.max_push_constant_size.min(128)
+        } else {
+            0
+        };
+
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("VkWebGPU Device"),
-                required_features: wgpu::Features::PUSH_CONSTANTS 
-                    | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
-                    | wgpu::Features::MULTI_DRAW_INDIRECT
-                    | wgpu::Features::INDIRECT_FIRST_INSTANCE,
+                required_features,
                 required_limits: wgpu::Limits {
-                    max_push_constant_size: 128,
+                    max_push_constant_size,
                     ..Default::default()
                 },
             },
             None,
         ))
         .map_err(|e| VkError::DeviceCreationFailed(e.to_string()))?;
+
+        info!("WebGPU device created successfully");
 
         Ok(Self {
             instance,
