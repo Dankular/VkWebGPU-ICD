@@ -321,6 +321,7 @@ pub unsafe extern "system" fn vkGetDeviceProcAddr(
         b"vkCmdPipelineBarrier" => {
             std::mem::transmute(vkCmdPipelineBarrier as vk::PFN_vkCmdPipelineBarrier)
         }
+        b"vkCmdDispatch" => std::mem::transmute(vkCmdDispatch as vk::PFN_vkCmdDispatch),
 
         // Queue operations
         b"vkQueueSubmit" => std::mem::transmute(vkQueueSubmit as vk::PFN_vkQueueSubmit),
@@ -1034,6 +1035,21 @@ pub unsafe extern "system" fn vkCmdPipelineBarrier(
         p_buffer_memory_barriers,
         image_memory_barrier_count,
         p_image_memory_barriers,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCmdDispatch(
+    command_buffer: vk::CommandBuffer,
+    group_count_x: u32,
+    group_count_y: u32,
+    group_count_z: u32,
+) {
+    crate::command_buffer::cmd_dispatch(
+        command_buffer,
+        group_count_x,
+        group_count_y,
+        group_count_z,
     );
 }
 

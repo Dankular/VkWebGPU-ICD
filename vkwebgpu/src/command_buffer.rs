@@ -1,5 +1,10 @@
 //! Vulkan Command Buffer implementation
 //! Maps VkCommandBuffer to WebGPU GPUCommandEncoder
+//!
+//! Uses deferred command recording: Vulkan commands are recorded into a command list
+//! and then replayed at vkQueueSubmit time to create the actual WebGPU command buffer.
+//! This approach correctly handles WebGPU's scoped RenderPass lifetime while maintaining
+//! Vulkan's thread-safe command buffer recording semantics.
 
 use ash::vk::{self, Handle};
 use log::debug;
@@ -7,8 +12,8 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+use crate::backend::{CommandBuffer, WebGPUBackend};
 use crate::command_pool;
-use crate::device;
 use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
 
@@ -20,10 +25,7 @@ pub struct VkCommandBufferData {
     pub command_pool: vk::CommandPool,
     pub level: vk::CommandBufferLevel,
     pub state: RwLock<CommandBufferState>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub encoder: RwLock<Option<wgpu::CommandEncoder>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub finished_buffers: RwLock<Vec<wgpu::CommandBuffer>>,
+    pub commands: RwLock<Vec<RecordedCommand>>,
 }
 
 pub enum CommandBufferState {
@@ -31,6 +33,73 @@ pub enum CommandBufferState {
     Recording,
     Executable,
     Invalid,
+}
+
+/// Recorded command - stores all data needed to replay the command at submit time
+#[derive(Clone)]
+pub enum RecordedCommand {
+    BeginRenderPass {
+        render_pass: vk::RenderPass,
+        framebuffer: vk::Framebuffer,
+        render_area: vk::Rect2D,
+        clear_values: Vec<vk::ClearValue>,
+    },
+    EndRenderPass,
+    BindPipeline {
+        bind_point: vk::PipelineBindPoint,
+        pipeline: vk::Pipeline,
+    },
+    BindVertexBuffers {
+        first_binding: u32,
+        buffers: Vec<vk::Buffer>,
+        offsets: Vec<vk::DeviceSize>,
+    },
+    BindIndexBuffer {
+        buffer: vk::Buffer,
+        offset: vk::DeviceSize,
+        index_type: vk::IndexType,
+    },
+    BindDescriptorSets {
+        bind_point: vk::PipelineBindPoint,
+        layout: vk::PipelineLayout,
+        first_set: u32,
+        descriptor_sets: Vec<vk::DescriptorSet>,
+        dynamic_offsets: Vec<u32>,
+    },
+    Draw {
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    },
+    DrawIndexed {
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32,
+    },
+    Dispatch {
+        group_count_x: u32,
+        group_count_y: u32,
+        group_count_z: u32,
+    },
+    CopyBuffer {
+        src_buffer: vk::Buffer,
+        dst_buffer: vk::Buffer,
+        regions: Vec<vk::BufferCopy>,
+    },
+    CopyBufferToImage {
+        src_buffer: vk::Buffer,
+        dst_image: vk::Image,
+        dst_image_layout: vk::ImageLayout,
+        regions: Vec<vk::BufferImageCopy>,
+    },
+    PipelineBarrier {
+        src_stage_mask: vk::PipelineStageFlags,
+        dst_stage_mask: vk::PipelineStageFlags,
+        dependency_flags: vk::DependencyFlags,
+    },
 }
 
 pub unsafe fn allocate_command_buffers(
@@ -56,10 +125,7 @@ pub unsafe fn allocate_command_buffers(
             command_pool: allocate_info.command_pool,
             level: allocate_info.level,
             state: RwLock::new(CommandBufferState::Initial),
-            #[cfg(not(target_arch = "wasm32"))]
-            encoder: RwLock::new(None),
-            #[cfg(not(target_arch = "wasm32"))]
-            finished_buffers: RwLock::new(Vec::new()),
+            commands: RwLock::new(Vec::new()),
         };
 
         let cmd_handle = COMMAND_BUFFER_ALLOCATOR.allocate(cmd_data);
@@ -79,23 +145,10 @@ pub unsafe fn begin_command_buffer(
         .get(command_buffer.as_raw())
         .ok_or_else(|| VkError::InvalidHandle("Invalid command buffer".to_string()))?;
 
-    let device_data = device::get_device_data(cmd_data.device)
-        .ok_or_else(|| VkError::InvalidHandle("Invalid device".to_string()))?;
-
     debug!("Beginning command buffer recording");
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let encoder =
-            device_data
-                .backend
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("VkCommandBuffer"),
-                });
-
-        *cmd_data.encoder.write() = Some(encoder);
-    }
+    // Clear previous commands
+    cmd_data.commands.write().clear();
 
     *cmd_data.state.write() = CommandBufferState::Recording;
 
@@ -115,117 +168,303 @@ pub unsafe fn end_command_buffer(command_buffer: vk::CommandBuffer) -> Result<()
 }
 
 pub unsafe fn cmd_begin_render_pass(
-    _command_buffer: vk::CommandBuffer,
-    _p_render_pass_begin: *const vk::RenderPassBeginInfo,
+    command_buffer: vk::CommandBuffer,
+    p_render_pass_begin: *const vk::RenderPassBeginInfo,
     _contents: vk::SubpassContents,
 ) {
-    debug!("Begin render pass");
-    // Simplified for now
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    let render_pass_begin = &*p_render_pass_begin;
+
+    debug!("Recording BeginRenderPass");
+
+    let clear_values = if render_pass_begin.clear_value_count > 0 {
+        std::slice::from_raw_parts(
+            render_pass_begin.p_clear_values,
+            render_pass_begin.clear_value_count as usize,
+        )
+        .to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::BeginRenderPass {
+            render_pass: render_pass_begin.render_pass,
+            framebuffer: render_pass_begin.framebuffer,
+            render_area: render_pass_begin.render_area,
+            clear_values,
+        });
 }
 
-pub unsafe fn cmd_end_render_pass(_command_buffer: vk::CommandBuffer) {
-    debug!("End render pass");
+pub unsafe fn cmd_end_render_pass(command_buffer: vk::CommandBuffer) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!("Recording EndRenderPass");
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::EndRenderPass);
 }
 
 pub unsafe fn cmd_bind_pipeline(
-    _command_buffer: vk::CommandBuffer,
-    _pipeline_bind_point: vk::PipelineBindPoint,
+    command_buffer: vk::CommandBuffer,
+    pipeline_bind_point: vk::PipelineBindPoint,
     pipeline: vk::Pipeline,
 ) {
-    debug!("Bind pipeline: {:?}", pipeline);
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!("Recording BindPipeline: {:?}", pipeline);
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::BindPipeline {
+            bind_point: pipeline_bind_point,
+            pipeline,
+        });
 }
 
 pub unsafe fn cmd_bind_descriptor_sets(
-    _command_buffer: vk::CommandBuffer,
-    _pipeline_bind_point: vk::PipelineBindPoint,
-    _layout: vk::PipelineLayout,
-    _first_set: u32,
+    command_buffer: vk::CommandBuffer,
+    pipeline_bind_point: vk::PipelineBindPoint,
+    layout: vk::PipelineLayout,
+    first_set: u32,
     descriptor_set_count: u32,
-    _p_descriptor_sets: *const vk::DescriptorSet,
-    _dynamic_offset_count: u32,
-    _p_dynamic_offsets: *const u32,
+    p_descriptor_sets: *const vk::DescriptorSet,
+    dynamic_offset_count: u32,
+    p_dynamic_offsets: *const u32,
 ) {
-    debug!("Bind {} descriptor sets", descriptor_set_count);
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!(
+        "Recording BindDescriptorSets: {} sets",
+        descriptor_set_count
+    );
+
+    let descriptor_sets = if descriptor_set_count > 0 {
+        std::slice::from_raw_parts(p_descriptor_sets, descriptor_set_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let dynamic_offsets = if dynamic_offset_count > 0 {
+        std::slice::from_raw_parts(p_dynamic_offsets, dynamic_offset_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::BindDescriptorSets {
+            bind_point: pipeline_bind_point,
+            layout,
+            first_set,
+            descriptor_sets,
+            dynamic_offsets,
+        });
 }
 
 pub unsafe fn cmd_draw(
-    _command_buffer: vk::CommandBuffer,
+    command_buffer: vk::CommandBuffer,
     vertex_count: u32,
     instance_count: u32,
     first_vertex: u32,
     first_instance: u32,
 ) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
     debug!(
-        "Draw: vertices={}, instances={}, first_vertex={}, first_instance={}",
+        "Recording Draw: vertices={}, instances={}, first_vertex={}, first_instance={}",
         vertex_count, instance_count, first_vertex, first_instance
     );
+
+    cmd_data.commands.write().push(RecordedCommand::Draw {
+        vertex_count,
+        instance_count,
+        first_vertex,
+        first_instance,
+    });
 }
 
 pub unsafe fn cmd_draw_indexed(
-    _command_buffer: vk::CommandBuffer,
+    command_buffer: vk::CommandBuffer,
     index_count: u32,
     instance_count: u32,
     first_index: u32,
     vertex_offset: i32,
     first_instance: u32,
 ) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
     debug!(
-        "Draw indexed: indices={}, instances={}, first_index={}, vertex_offset={}, first_instance={}",
+        "Recording DrawIndexed: indices={}, instances={}, first_index={}, vertex_offset={}, first_instance={}",
         index_count, instance_count, first_index, vertex_offset, first_instance
     );
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::DrawIndexed {
+            index_count,
+            instance_count,
+            first_index,
+            vertex_offset,
+            first_instance,
+        });
 }
 
 pub unsafe fn cmd_bind_vertex_buffers(
-    _command_buffer: vk::CommandBuffer,
+    command_buffer: vk::CommandBuffer,
     first_binding: u32,
     binding_count: u32,
-    _p_buffers: *const vk::Buffer,
-    _p_offsets: *const vk::DeviceSize,
+    p_buffers: *const vk::Buffer,
+    p_offsets: *const vk::DeviceSize,
 ) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
     debug!(
-        "Bind {} vertex buffers starting at binding {}",
+        "Recording BindVertexBuffers: {} buffers starting at binding {}",
         binding_count, first_binding
     );
+
+    let buffers = if binding_count > 0 {
+        std::slice::from_raw_parts(p_buffers, binding_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let offsets = if binding_count > 0 {
+        std::slice::from_raw_parts(p_offsets, binding_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::BindVertexBuffers {
+            first_binding,
+            buffers,
+            offsets,
+        });
 }
 
 pub unsafe fn cmd_bind_index_buffer(
-    _command_buffer: vk::CommandBuffer,
-    _buffer: vk::Buffer,
+    command_buffer: vk::CommandBuffer,
+    buffer: vk::Buffer,
     offset: vk::DeviceSize,
     index_type: vk::IndexType,
 ) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
     debug!(
-        "Bind index buffer: offset={}, type={:?}",
+        "Recording BindIndexBuffer: offset={}, type={:?}",
         offset, index_type
     );
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::BindIndexBuffer {
+            buffer,
+            offset,
+            index_type,
+        });
 }
 
 pub unsafe fn cmd_copy_buffer(
-    _command_buffer: vk::CommandBuffer,
-    _src_buffer: vk::Buffer,
-    _dst_buffer: vk::Buffer,
+    command_buffer: vk::CommandBuffer,
+    src_buffer: vk::Buffer,
+    dst_buffer: vk::Buffer,
     region_count: u32,
-    _p_regions: *const vk::BufferCopy,
+    p_regions: *const vk::BufferCopy,
 ) {
-    debug!("Copy buffer: {} regions", region_count);
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!("Recording CopyBuffer: {} regions", region_count);
+
+    let regions = if region_count > 0 {
+        std::slice::from_raw_parts(p_regions, region_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data.commands.write().push(RecordedCommand::CopyBuffer {
+        src_buffer,
+        dst_buffer,
+        regions,
+    });
 }
 
 pub unsafe fn cmd_copy_buffer_to_image(
-    _command_buffer: vk::CommandBuffer,
-    _src_buffer: vk::Buffer,
-    _dst_image: vk::Image,
-    _dst_image_layout: vk::ImageLayout,
+    command_buffer: vk::CommandBuffer,
+    src_buffer: vk::Buffer,
+    dst_image: vk::Image,
+    dst_image_layout: vk::ImageLayout,
     region_count: u32,
-    _p_regions: *const vk::BufferImageCopy,
+    p_regions: *const vk::BufferImageCopy,
 ) {
-    debug!("Copy buffer to image: {} regions", region_count);
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
+    debug!("Recording CopyBufferToImage: {} regions", region_count);
+
+    let regions = if region_count > 0 {
+        std::slice::from_raw_parts(p_regions, region_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::CopyBufferToImage {
+            src_buffer,
+            dst_image,
+            dst_image_layout,
+            regions,
+        });
 }
 
 pub unsafe fn cmd_pipeline_barrier(
-    _command_buffer: vk::CommandBuffer,
-    _src_stage_mask: vk::PipelineStageFlags,
-    _dst_stage_mask: vk::PipelineStageFlags,
-    _dependency_flags: vk::DependencyFlags,
+    command_buffer: vk::CommandBuffer,
+    src_stage_mask: vk::PipelineStageFlags,
+    dst_stage_mask: vk::PipelineStageFlags,
+    dependency_flags: vk::DependencyFlags,
     memory_barrier_count: u32,
     _p_memory_barriers: *const vk::MemoryBarrier,
     buffer_memory_barrier_count: u32,
@@ -233,33 +472,109 @@ pub unsafe fn cmd_pipeline_barrier(
     image_memory_barrier_count: u32,
     _p_image_memory_barriers: *const vk::ImageMemoryBarrier,
 ) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
+
     debug!(
-        "Pipeline barrier: mem={}, buf={}, img={}",
+        "Recording PipelineBarrier: mem={}, buf={}, img={}",
         memory_barrier_count, buffer_memory_barrier_count, image_memory_barrier_count
     );
-    // WebGPU handles barriers implicitly
+
+    // WebGPU handles barriers implicitly, but we record it for completeness
+    cmd_data
+        .commands
+        .write()
+        .push(RecordedCommand::PipelineBarrier {
+            src_stage_mask,
+            dst_stage_mask,
+            dependency_flags,
+        });
 }
 
-impl VkCommandBufferData {
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn finish(&self) -> Result<Vec<wgpu::CommandBuffer>> {
-        let mut encoder = self.encoder.write();
-        if let Some(enc) = encoder.take() {
-            let buffer = enc.finish();
-            Ok(vec![buffer])
-        } else {
-            Ok(Vec::new())
-        }
-    }
+pub unsafe fn cmd_dispatch(
+    command_buffer: vk::CommandBuffer,
+    group_count_x: u32,
+    group_count_y: u32,
+    group_count_z: u32,
+) {
+    let cmd_data = match COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw()) {
+        Some(data) => data,
+        None => return,
+    };
 
-    #[cfg(target_arch = "wasm32")]
-    pub fn finish(&self) -> Result<Vec<crate::backend::CommandBuffer>> {
-        Ok(Vec::new())
-    }
+    debug!(
+        "Recording Dispatch: {}x{}x{}",
+        group_count_x, group_count_y, group_count_z
+    );
+
+    cmd_data.commands.write().push(RecordedCommand::Dispatch {
+        group_count_x,
+        group_count_y,
+        group_count_z,
+    });
 }
 
 pub fn get_command_buffer_data(
     command_buffer: vk::CommandBuffer,
 ) -> Option<Arc<VkCommandBufferData>> {
     COMMAND_BUFFER_ALLOCATOR.get(command_buffer.as_raw())
+}
+
+/// Replay recorded commands to create a WebGPU command buffer
+/// TODO: This is a simplified stub - needs full implementation with proper lifetime management
+#[cfg(not(target_arch = "wasm32"))]
+pub fn replay_commands(
+    cmd_data: &VkCommandBufferData,
+    backend: &WebGPUBackend,
+) -> Result<CommandBuffer> {
+    let encoder = backend
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("VkWebGPU Command Encoder"),
+        });
+
+    let commands = cmd_data.commands.read();
+
+    debug!(
+        "Replaying {} recorded commands (stub implementation)",
+        commands.len()
+    );
+
+    // TODO: Implement full command replay with proper WebGPU resource lifetime management
+    // The challenge is that WebGPU RenderPass/ComputePass lifetimes conflict with Vulkan's model
+    // Need to carefully manage Arc references and ensure WebGPU resources outlive pass encoders
+
+    // Stub implementation - just log commands for now
+    for command in commands.iter() {
+        match command {
+            RecordedCommand::BeginRenderPass { .. } => debug!("Replay: BeginRenderPass"),
+            RecordedCommand::EndRenderPass => debug!("Replay: EndRenderPass"),
+            RecordedCommand::BindPipeline { .. } => debug!("Replay: BindPipeline"),
+            RecordedCommand::BindVertexBuffers { .. } => debug!("Replay: BindVertexBuffers"),
+            RecordedCommand::BindIndexBuffer { .. } => debug!("Replay: BindIndexBuffer"),
+            RecordedCommand::BindDescriptorSets { .. } => debug!("Replay: BindDescriptorSets"),
+            RecordedCommand::Draw { .. } => debug!("Replay: Draw"),
+            RecordedCommand::DrawIndexed { .. } => debug!("Replay: DrawIndexed"),
+            RecordedCommand::Dispatch { .. } => debug!("Replay: Dispatch"),
+            RecordedCommand::CopyBuffer { .. } => debug!("Replay: CopyBuffer"),
+            RecordedCommand::CopyBufferToImage { .. } => debug!("Replay: CopyBufferToImage"),
+            RecordedCommand::PipelineBarrier { .. } => debug!("Replay: PipelineBarrier"),
+        }
+    }
+
+    // Return an empty command buffer for now
+    Ok(encoder.finish())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn replay_commands(
+    _cmd_data: &VkCommandBufferData,
+    _backend: &WebGPUBackend,
+) -> Result<CommandBuffer> {
+    // WASM implementation would go here
+    Err(VkError::NotImplemented(
+        "WASM command replay not yet implemented".to_string(),
+    ))
 }

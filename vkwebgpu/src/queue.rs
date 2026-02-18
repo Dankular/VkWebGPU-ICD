@@ -81,21 +81,24 @@ pub unsafe fn queue_submit(
 
             for &cmd_buffer in cmd_buffers {
                 if let Some(cmd_data) = command_buffer::get_command_buffer_data(cmd_buffer) {
-                    let finished_buffers = cmd_data.finish()?;
+                    // Replay commands to create WebGPU command buffer
+                    let webgpu_cmd_buffer =
+                        command_buffer::replay_commands(&cmd_data, &device_data.backend)?;
 
                     #[cfg(not(target_arch = "wasm32"))]
                     {
-                        device_data.backend.queue.submit(finished_buffers);
+                        device_data
+                            .backend
+                            .queue
+                            .submit(std::iter::once(webgpu_cmd_buffer));
                     }
 
                     #[cfg(target_arch = "wasm32")]
                     {
-                        for buffer in finished_buffers {
-                            use wasm_bindgen::JsCast;
-                            let js_array = js_sys::Array::new();
-                            js_array.push(&buffer);
-                            device_data.backend.queue.submit(&js_array);
-                        }
+                        use wasm_bindgen::JsCast;
+                        let js_array = js_sys::Array::new();
+                        js_array.push(&webgpu_cmd_buffer);
+                        device_data.backend.queue.submit(&js_array);
                     }
                 }
             }
