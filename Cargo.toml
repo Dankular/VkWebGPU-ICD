@@ -1,0 +1,46 @@
+[workspace]
+members = [
+    "vkwebgpu",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["VkWebGPU Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/VkWebGPU-ICD"
+
+[workspace.dependencies]
+# Vulkan bindings
+ash = "0.38"
+
+# Shader translation
+naga = { version = "0.20", features = ["spv-in", "wgsl-out"] }
+
+# WebGPU backend for testing
+wgpu = "0.20"
+
+# Core utilities
+log = "0.4"
+env_logger = "0.11"
+parking_lot = "0.12"
+once_cell = "1.19"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Collections
+indexmap = "2.2"
+rustc-hash = "1.1"
+
+# WASM support
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Gpu", "GpuDevice", "GpuAdapter"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

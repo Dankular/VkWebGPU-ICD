@@ -1,0 +1,36 @@
+[package]
+name = "vkwebgpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ash.workspace = true
+naga.workspace = true
+wgpu.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+once_cell.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+indexmap.workspace = true
+rustc-hash.workspace = true
+
+# WASM-specific dependencies
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+web-sys.workspace = true
+
+# Native-specific dependencies
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger.workspace = true
+pollster = "0.3"
+
+[features]
+default = []
+debug-markers = []
+validation = []
