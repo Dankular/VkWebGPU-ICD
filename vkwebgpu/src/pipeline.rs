@@ -353,6 +353,74 @@ unsafe fn create_wgpu_render_pipeline(
     Ok(pipeline)
 }
 
+pub unsafe fn create_compute_pipelines(
+    device: vk::Device,
+    _pipeline_cache: vk::PipelineCache,
+    create_info_count: u32,
+    p_create_infos: *const vk::ComputePipelineCreateInfo,
+    _p_allocator: *const vk::AllocationCallbacks,
+    p_pipelines: *mut vk::Pipeline,
+) -> Result<()> {
+    let create_infos = std::slice::from_raw_parts(p_create_infos, create_info_count as usize);
+    let pipelines = std::slice::from_raw_parts_mut(p_pipelines, create_info_count as usize);
+
+    let device_data = device::get_device_data(device)
+        .ok_or_else(|| VkError::InvalidHandle("Invalid device".to_string()))?;
+
+    for (i, create_info) in create_infos.iter().enumerate() {
+        debug!("Creating compute pipeline {}/{}", i + 1, create_info_count);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let wgpu_pipeline = {
+            // Get pipeline layout
+            let layout_data = PIPELINE_LAYOUT_ALLOCATOR
+                .get(create_info.layout.as_raw())
+                .ok_or_else(|| VkError::InvalidHandle("Invalid pipeline layout".to_string()))?;
+
+            // Get shader module
+            let shader_data = SHADER_MODULE_ALLOCATOR
+                .get(create_info.stage.module.as_raw())
+                .ok_or_else(|| VkError::InvalidHandle("Invalid shader module".to_string()))?;
+
+            let wgsl = device_data
+                .shader_cache
+                .get_or_translate(&shader_data.spirv)?;
+
+            let module =
+                device_data
+                    .backend
+                    .device
+                    .create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some("ComputeShader"),
+                        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(&wgsl)),
+                    });
+
+            device_data
+                .backend
+                .device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("VkComputePipeline"),
+                    layout: Some(&layout_data.wgpu_layout),
+                    module: &module,
+                    entry_point: "main",
+                    compilation_options: Default::default(),
+                })
+        };
+
+        let pipeline_data = VkPipelineData::Compute {
+            device,
+            layout: create_info.layout,
+            #[cfg(not(target_arch = "wasm32"))]
+            wgpu_pipeline: Arc::new(wgpu_pipeline),
+        };
+
+        let pipeline_handle = PIPELINE_ALLOCATOR.allocate(pipeline_data);
+        pipelines[i] = Handle::from_raw(pipeline_handle);
+    }
+
+    Ok(())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn process_vertex_input_state(
     vis: &vk::PipelineVertexInputStateCreateInfo,

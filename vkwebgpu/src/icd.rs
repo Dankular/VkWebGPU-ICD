@@ -261,6 +261,9 @@ pub unsafe extern "system" fn vkGetDeviceProcAddr(
         b"vkCreateGraphicsPipelines" => {
             std::mem::transmute(vkCreateGraphicsPipelines as vk::PFN_vkCreateGraphicsPipelines)
         }
+        b"vkCreateComputePipelines" => {
+            std::mem::transmute(vkCreateComputePipelines as vk::PFN_vkCreateComputePipelines)
+        }
         b"vkDestroyPipeline" => std::mem::transmute(vkDestroyPipeline as vk::PFN_vkDestroyPipeline),
 
         // Render passes
@@ -406,8 +409,7 @@ pub unsafe extern "system" fn vkMapMemory(
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn vkUnmapMemory(device: vk::Device,
-    memory: vk::DeviceMemory) {
+pub unsafe extern "system" fn vkUnmapMemory(device: vk::Device, memory: vk::DeviceMemory) {
     crate::memory::unmap_memory(device, memory);
 }
 
@@ -708,6 +710,28 @@ pub unsafe extern "system" fn vkCreateGraphicsPipelines(
     p_pipelines: *mut vk::Pipeline,
 ) -> vk::Result {
     match crate::pipeline::create_graphics_pipelines(
+        device,
+        pipeline_cache,
+        create_info_count,
+        p_create_infos,
+        p_allocator,
+        p_pipelines,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkCreateComputePipelines(
+    device: vk::Device,
+    pipeline_cache: vk::PipelineCache,
+    create_info_count: u32,
+    p_create_infos: *const vk::ComputePipelineCreateInfo,
+    p_allocator: *const vk::AllocationCallbacks,
+    p_pipelines: *mut vk::Pipeline,
+) -> vk::Result {
+    match crate::pipeline::create_compute_pipelines(
         device,
         pipeline_cache,
         create_info_count,
