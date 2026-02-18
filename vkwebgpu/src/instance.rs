@@ -446,3 +446,152 @@ pub fn get_physical_device_data(
 ) -> Option<Arc<VkPhysicalDeviceData>> {
     PHYSICAL_DEVICE_ALLOCATOR.get(physical_device.as_raw())
 }
+
+/// Enumerate instance extensions
+pub unsafe fn enumerate_instance_extension_properties(
+    _p_layer_name: *const std::os::raw::c_char,
+    p_property_count: *mut u32,
+    p_properties: *mut vk::ExtensionProperties,
+) -> Result<()> {
+    // List of extensions our ICD supports
+    const INSTANCE_EXTENSIONS: &[(&str, u32)] = &[
+        ("VK_KHR_surface", 25),                        // Required for swapchain
+        ("VK_KHR_get_physical_device_properties2", 2), // DXVK uses this
+    ];
+
+    if p_properties.is_null() {
+        *p_property_count = INSTANCE_EXTENSIONS.len() as u32;
+    } else {
+        let count = (*p_property_count as usize).min(INSTANCE_EXTENSIONS.len());
+        let props = std::slice::from_raw_parts_mut(p_properties, count);
+
+        for (i, (name, version)) in INSTANCE_EXTENSIONS.iter().enumerate().take(count) {
+            props[i] = vk::ExtensionProperties {
+                extension_name: {
+                    let mut arr = [0i8; 256];
+                    for (j, &c) in name.as_bytes().iter().enumerate() {
+                        arr[j] = c as i8;
+                    }
+                    arr
+                },
+                spec_version: *version,
+            };
+        }
+
+        *p_property_count = count as u32;
+    }
+
+    Ok(())
+}
+
+/// Get format properties
+pub unsafe fn get_physical_device_format_properties(
+    _physical_device: vk::PhysicalDevice,
+    format: vk::Format,
+    p_format_properties: *mut vk::FormatProperties,
+) {
+    let mut props = vk::FormatProperties::default();
+
+    // Check if we support this format
+    #[cfg(not(target_arch = "wasm32"))]
+    let supported = crate::format::vk_to_wgpu_format(format).is_some();
+
+    #[cfg(target_arch = "wasm32")]
+    let supported = false; // Conservative for WASM
+
+    if supported {
+        // WebGPU supports most operations on supported formats
+        let features = vk::FormatFeatureFlags::SAMPLED_IMAGE
+            | vk::FormatFeatureFlags::TRANSFER_SRC
+            | vk::FormatFeatureFlags::TRANSFER_DST
+            | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR;
+
+        // Add color attachment features for color formats
+        let color_features = if !matches!(
+            format,
+            vk::Format::D16_UNORM
+                | vk::Format::D32_SFLOAT
+                | vk::Format::D24_UNORM_S8_UINT
+                | vk::Format::D32_SFLOAT_S8_UINT
+                | vk::Format::S8_UINT
+        ) {
+            vk::FormatFeatureFlags::COLOR_ATTACHMENT
+                | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND
+        } else {
+            vk::FormatFeatureFlags::empty()
+        };
+
+        props.linear_tiling_features = features | color_features;
+        props.optimal_tiling_features = features | color_features;
+        props.buffer_features =
+            vk::FormatFeatureFlags::VERTEX_BUFFER | vk::FormatFeatureFlags::UNIFORM_TEXEL_BUFFER;
+
+        // Add depth/stencil features for depth formats
+        if matches!(
+            format,
+            vk::Format::D16_UNORM
+                | vk::Format::D32_SFLOAT
+                | vk::Format::D24_UNORM_S8_UINT
+                | vk::Format::D32_SFLOAT_S8_UINT
+        ) {
+            props.optimal_tiling_features |= vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT;
+            props.linear_tiling_features |= vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT;
+        }
+    }
+
+    *p_format_properties = props;
+}
+
+/// Get image format properties
+pub unsafe fn get_physical_device_image_format_properties(
+    _physical_device: vk::PhysicalDevice,
+    format: vk::Format,
+    image_type: vk::ImageType,
+    _tiling: vk::ImageTiling,
+    _usage: vk::ImageUsageFlags,
+    _flags: vk::ImageCreateFlags,
+    p_image_format_properties: *mut vk::ImageFormatProperties,
+) -> Result<()> {
+    // Check if format is supported
+    #[cfg(not(target_arch = "wasm32"))]
+    let supported = crate::format::vk_to_wgpu_format(format).is_some();
+
+    #[cfg(target_arch = "wasm32")]
+    let supported = false;
+
+    if !supported {
+        return Err(VkError::FormatNotSupported);
+    }
+
+    // WebGPU limits (conservative defaults)
+    let mut props = vk::ImageFormatProperties {
+        max_extent: vk::Extent3D {
+            width: 16384, // Max texture size
+            height: 16384,
+            depth: 2048,
+        },
+        max_mip_levels: 14, // log2(16384) + 1
+        max_array_layers: 2048,
+        sample_counts: vk::SampleCountFlags::TYPE_1 | vk::SampleCountFlags::TYPE_4,
+        max_resource_size: 4 * 1024 * 1024 * 1024, // 4GB
+    };
+
+    // Adjust based on image type
+    match image_type {
+        vk::ImageType::TYPE_1D => {
+            props.max_extent.height = 1;
+            props.max_extent.depth = 1;
+            props.max_array_layers = 2048;
+        }
+        vk::ImageType::TYPE_2D => {
+            props.max_extent.depth = 1;
+        }
+        vk::ImageType::TYPE_3D => {
+            props.max_array_layers = 1;
+        }
+        _ => {}
+    }
+
+    *p_image_format_properties = props;
+    Ok(())
+}

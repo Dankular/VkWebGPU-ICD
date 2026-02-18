@@ -142,3 +142,47 @@ pub unsafe fn device_wait_idle(device: vk::Device) -> Result<()> {
 
     Ok(())
 }
+
+/// Enumerate device extensions
+pub unsafe fn enumerate_device_extension_properties(
+    _physical_device: vk::PhysicalDevice,
+    _p_layer_name: *const std::os::raw::c_char,
+    p_property_count: *mut u32,
+    p_properties: *mut vk::ExtensionProperties,
+) -> Result<()> {
+    // Extensions our device/ICD supports
+    const DEVICE_EXTENSIONS: &[(&str, u32)] = &[
+        ("VK_KHR_swapchain", 70),   // Swapchain support
+        ("VK_KHR_maintenance1", 2), // DXVK uses this
+        ("VK_KHR_maintenance2", 1),
+        ("VK_KHR_maintenance3", 1),
+        ("VK_KHR_dedicated_allocation", 3),
+        ("VK_KHR_get_memory_requirements2", 1),
+        ("VK_EXT_descriptor_indexing", 2), // DXVK may need this
+        ("VK_KHR_bind_memory2", 1),
+    ];
+
+    if p_properties.is_null() {
+        *p_property_count = DEVICE_EXTENSIONS.len() as u32;
+    } else {
+        let count = (*p_property_count as usize).min(DEVICE_EXTENSIONS.len());
+        let props = std::slice::from_raw_parts_mut(p_properties, count);
+
+        for (i, (name, version)) in DEVICE_EXTENSIONS.iter().enumerate().take(count) {
+            props[i] = vk::ExtensionProperties {
+                extension_name: {
+                    let mut arr = [0i8; 256];
+                    for (j, &c) in name.as_bytes().iter().enumerate() {
+                        arr[j] = c as i8;
+                    }
+                    arr
+                },
+                spec_version: *version,
+            };
+        }
+
+        *p_property_count = count as u32;
+    }
+
+    Ok(())
+}

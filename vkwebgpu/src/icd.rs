@@ -26,6 +26,10 @@ pub unsafe extern "system" fn vk_icdGetInstanceProcAddr(
     match name.to_bytes() {
         b"vkCreateInstance" => std::mem::transmute(vkCreateInstance as vk::PFN_vkCreateInstance),
         b"vkDestroyInstance" => std::mem::transmute(vkDestroyInstance as vk::PFN_vkDestroyInstance),
+        b"vkEnumerateInstanceExtensionProperties" => std::mem::transmute(
+            vkEnumerateInstanceExtensionProperties
+                as vk::PFN_vkEnumerateInstanceExtensionProperties,
+        ),
         b"vkEnumeratePhysicalDevices" => {
             std::mem::transmute(vkEnumeratePhysicalDevices as vk::PFN_vkEnumeratePhysicalDevices)
         }
@@ -41,6 +45,16 @@ pub unsafe extern "system" fn vk_icdGetInstanceProcAddr(
         ),
         b"vkGetPhysicalDeviceMemoryProperties" => std::mem::transmute(
             vkGetPhysicalDeviceMemoryProperties as vk::PFN_vkGetPhysicalDeviceMemoryProperties,
+        ),
+        b"vkEnumerateDeviceExtensionProperties" => std::mem::transmute(
+            vkEnumerateDeviceExtensionProperties as vk::PFN_vkEnumerateDeviceExtensionProperties,
+        ),
+        b"vkGetPhysicalDeviceFormatProperties" => std::mem::transmute(
+            vkGetPhysicalDeviceFormatProperties as vk::PFN_vkGetPhysicalDeviceFormatProperties,
+        ),
+        b"vkGetPhysicalDeviceImageFormatProperties" => std::mem::transmute(
+            vkGetPhysicalDeviceImageFormatProperties
+                as vk::PFN_vkGetPhysicalDeviceImageFormatProperties,
         ),
         b"vkCreateDevice" => std::mem::transmute(vkCreateDevice as vk::PFN_vkCreateDevice),
         b"vkGetDeviceProcAddr" => {
@@ -156,6 +170,77 @@ pub unsafe extern "system" fn vkGetPhysicalDeviceMemoryProperties(
     p_memory_properties: *mut vk::PhysicalDeviceMemoryProperties,
 ) {
     crate::memory::get_physical_device_memory_properties(physical_device, p_memory_properties);
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkEnumerateInstanceExtensionProperties(
+    p_layer_name: *const c_char,
+    p_property_count: *mut u32,
+    p_properties: *mut vk::ExtensionProperties,
+) -> vk::Result {
+    match crate::instance::enumerate_instance_extension_properties(
+        p_layer_name,
+        p_property_count,
+        p_properties,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkEnumerateDeviceExtensionProperties(
+    physical_device: vk::PhysicalDevice,
+    p_layer_name: *const c_char,
+    p_property_count: *mut u32,
+    p_properties: *mut vk::ExtensionProperties,
+) -> vk::Result {
+    match crate::device::enumerate_device_extension_properties(
+        physical_device,
+        p_layer_name,
+        p_property_count,
+        p_properties,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceFormatProperties(
+    physical_device: vk::PhysicalDevice,
+    format: vk::Format,
+    p_format_properties: *mut vk::FormatProperties,
+) {
+    crate::instance::get_physical_device_format_properties(
+        physical_device,
+        format,
+        p_format_properties,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn vkGetPhysicalDeviceImageFormatProperties(
+    physical_device: vk::PhysicalDevice,
+    format: vk::Format,
+    image_type: vk::ImageType,
+    tiling: vk::ImageTiling,
+    usage: vk::ImageUsageFlags,
+    flags: vk::ImageCreateFlags,
+    p_image_format_properties: *mut vk::ImageFormatProperties,
+) -> vk::Result {
+    match crate::instance::get_physical_device_image_format_properties(
+        physical_device,
+        format,
+        image_type,
+        tiling,
+        usage,
+        flags,
+        p_image_format_properties,
+    ) {
+        Ok(_) => vk::Result::SUCCESS,
+        Err(e) => e.to_vk_result(),
+    }
 }
 
 #[no_mangle]
