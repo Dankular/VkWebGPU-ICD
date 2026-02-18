@@ -186,10 +186,13 @@ fn vk_to_wgpu_buffer_usage(vk_usage: vk::BufferUsageFlags) -> wgpu::BufferUsages
         usage |= wgpu::BufferUsages::INDIRECT;
     }
 
-    // Ensure at least one usage is set
-    if usage.is_empty() {
-        usage = wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
-    }
+    // Always include copy usages.
+    // COPY_DST is required by queue.write_buffer() — our path for uploading CPU
+    // writes (mapped memory) to the GPU.  Without it, any flush on a staging
+    // buffer (TRANSFER_SRC only) or a uniform buffer silently drops the data.
+    // COPY_SRC is required when this buffer is the source of CmdCopyBuffer /
+    // CmdCopyBufferToImage.  Both are near-zero cost (just a usage flag).
+    usage |= wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
 
     usage
 }
