@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::command_buffer;
 use crate::device;
+use crate::memory;
 use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
 
@@ -63,6 +64,13 @@ pub unsafe fn queue_submit(
     if submit_count == 0 {
         return Ok(());
     }
+
+    // Flush HOST_COHERENT mapped memory before command replay.
+    // Applications that allocate HOST_COHERENT memory do not call
+    // vkFlushMappedMemoryRanges — they rely on automatic coherence.
+    // We must push their CPU writes to the wgpu Buffers now, before
+    // any recorded copy / draw commands reference those buffers.
+    memory::flush_all_mapped_memory(queue_data.device);
 
     let submits = std::slice::from_raw_parts(p_submits, submit_count as usize);
 
@@ -139,6 +147,9 @@ pub unsafe fn queue_submit2(
         }
         return Ok(());
     }
+
+    // Flush HOST_COHERENT mapped memory before command replay (same reason as queue_submit).
+    memory::flush_all_mapped_memory(queue_data.device);
 
     let submits = std::slice::from_raw_parts(p_submits, submit_count as usize);
 

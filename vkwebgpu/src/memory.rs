@@ -19,6 +19,12 @@ use crate::handle::HandleAllocator;
 pub static MEMORY_ALLOCATOR: Lazy<HandleAllocator<VkDeviceMemoryData>> =
     Lazy::new(|| HandleAllocator::new());
 
+/// All currently-mapped VkDeviceMemory handles.
+/// Used by `flush_all_mapped_memory` to flush HOST_COHERENT memory at vkQueueSubmit
+/// time — apps relying on coherent semantics never call vkFlushMappedMemoryRanges.
+pub static MAPPED_MEMORIES: Lazy<RwLock<Vec<vk::DeviceMemory>>> =
+    Lazy::new(|| RwLock::new(Vec::new()));
+
 /// Describes a wgpu Buffer that is bound to a VkDeviceMemory allocation.
 pub struct BoundBufferInfo {
     /// The wgpu buffer to flush CPU data into.
@@ -114,6 +120,9 @@ pub unsafe fn map_memory(
     // Store map state (offset so we can flush the right range on unmap).
     *memory_data.mapped_ptr.write() = Some(ptr as *mut u8);
 
+    // Track as mapped so queue_submit can flush HOST_COHERENT memory automatically.
+    MAPPED_MEMORIES.write().push(memory);
+
     debug!("Mapped memory at offset {} size {}", offset, size);
     Ok(())
 }
@@ -125,6 +134,9 @@ pub unsafe fn unmap_memory(device: vk::Device, memory: vk::DeviceMemory) {
     };
 
     *memory_data.mapped_ptr.write() = None;
+
+    // Deregister before flushing so queue_submit doesn't double-flush.
+    MAPPED_MEMORIES.write().retain(|&m| m != memory);
 
     // Flush all CPU-side writes to every wgpu Buffer bound to this memory.
     flush_bound_buffers(device, &memory_data);
@@ -270,6 +282,27 @@ pub fn get_memory_data(memory: vk::DeviceMemory) -> Option<Arc<VkDeviceMemoryDat
 
 /// Register a wgpu Buffer bound to this memory so it can be flushed on unmap.
 /// Called by buffer::bind_buffer_memory after the wgpu Buffer is created.
+/// Flush all currently-mapped memory allocations belonging to `device` to their
+/// wgpu Buffers.
+///
+/// Must be called at `vkQueueSubmit` time before command replay.  Applications
+/// that allocate HOST_COHERENT memory rely on the implementation providing
+/// automatic coherence — they never call `vkFlushMappedMemoryRanges`.  Without
+/// this call their staged data would never reach the wgpu Buffer and the GPU
+/// would read stale (all-zero) bytes.
+pub fn flush_all_mapped_memory(device: vk::Device) {
+    // Snapshot the list while holding the read lock, then release before doing
+    // any wgpu work (write_buffer internally acquires no extra memory locks).
+    let mapped: Vec<vk::DeviceMemory> = MAPPED_MEMORIES.read().clone();
+    for memory in mapped {
+        if let Some(memory_data) = MEMORY_ALLOCATOR.get(memory.as_raw()) {
+            if memory_data.device == device {
+                flush_bound_buffers(device, &memory_data);
+            }
+        }
+    }
+}
+
 pub fn register_bound_buffer(
     memory: vk::DeviceMemory,
     wgpu_buffer: Arc<wgpu::Buffer>,
