@@ -209,16 +209,21 @@ impl Default for ShaderCache {
 //
 // `split_combined_image_samplers` rewrites such SPIR-V so that every
 // COMBINED_IMAGE_SAMPLER variable at (set S, binding B) gains a companion
-// TypeSampler variable at (set S, binding B | 0x8000_0000), and every
+// TypeSampler variable at (set S, binding B_samp), and every
 //   %R = OpLoad %TypeSampledImage %V
 // in a function body is expanded to:
 //   %R_img  = OpLoad %TypeSampledImage %V
 //   %R_samp = OpLoad %TypeSampler      %V_samp
 //   %R      = OpSampledImage %TypeSampledImage %R_img %R_samp
 //
-// After this rewrite, naga sees proper OpSampledImage results and translates them
-// to WGSL `textureSample(tex, samp, uv)` with separate texture/sampler bindings —
-// exactly matching the BindGroupLayout we build in descriptor.rs.
+// The synthetic sampler binding B_samp is assigned compactly:
+//   B_samp = (max_binding_in_group + 1) + rank
+// where rank is the 0-indexed position of B among sorted combined-sampler bindings
+// within that descriptor set group. This keeps all binding numbers small (< 1000),
+// matching WebGPU's maxBindingsPerBindGroup limit.
+//
+// descriptor.rs uses the same formula (see `compute_sampler_binding_map`), so the
+// WGSL bindings always match the BindGroupLayout/BindGroup entries.
 
 const SPV_MAGIC: u32 = 0x07230203;
 
@@ -261,8 +266,6 @@ fn spv_has_combined_image_samplers(words: &[u32]) -> bool {
 
         match op {
             OP_TYPE_SAMPLED_IMAGE if wc == 3 => {
-                // The underlying image type need not be separately tracked here;
-                // we just note this type ID as a "sampled image" type.
                 sampled_image_types.insert(words[i + 1]);
             }
             OP_TYPE_POINTER if wc == 4 => {
@@ -288,6 +291,27 @@ fn spv_has_combined_image_samplers(words: &[u32]) -> bool {
     false
 }
 
+/// Compute the synthetic sampler binding number for a COMBINED_IMAGE_SAMPLER
+/// at `texture_binding` within a descriptor set whose combined-sampler bindings
+/// (sorted ascending) are `sorted_combined` and whose overall maximum binding is
+/// `max_binding`.
+///
+/// Formula: `max_binding + 1 + rank` where rank is the 0-indexed position of
+/// `texture_binding` in `sorted_combined`.
+///
+/// This function is also mirrored in `descriptor.rs::compute_sampler_binding_map`.
+pub fn compact_sampler_binding(
+    texture_binding: u32,
+    max_binding: u32,
+    sorted_combined: &[u32],
+) -> u32 {
+    let rank = sorted_combined
+        .iter()
+        .position(|&b| b == texture_binding)
+        .unwrap_or(0);
+    max_binding + 1 + rank as u32
+}
+
 /// Rewrite SPIR-V to split combined-image-sampler variables into separate image
 /// and sampler variables, inserting `OpSampledImage` at each use site.
 fn split_combined_image_samplers(words: &[u32]) -> Vec<u32> {
@@ -305,13 +329,18 @@ fn split_combined_image_samplers(words: &[u32]) -> Vec<u32> {
     let mut sampled_image_types = HashMap::<u32, u32>::new();
     // existing TypeSampler ID (if already present in the module)
     let mut existing_sampler_type: Option<u32> = None;
-    // combined_ptr_types: ptr_type_id → SI_type_id   (UniformConstant ptr-to-SampledImage)
+    // combined_ptr_types: ptr_type_id → SI_type_id
     let mut combined_ptr_types = HashMap::<u32, u32>::new();
-    // combined_vars: var_id → SI_type_id   (UniformConstant vars of combined type)
+    // combined_vars: var_id → SI_type_id
     let mut combined_vars = HashMap::<u32, u32>::new();
-    // per-var descriptor set / binding from OpDecorate
+    // all UniformConstant vars, for computing max_binding_per_group
+    let mut uc_vars = std::collections::HashSet::<u32>::new();
+    // binding/set for combined vars
     let mut var_ds = HashMap::<u32, u32>::new();
     let mut var_binding = HashMap::<u32, u32>::new();
+    // binding/set for ALL UniformConstant vars (to compute max_binding)
+    let mut all_uc_ds = HashMap::<u32, u32>::new();
+    let mut all_uc_binding = HashMap::<u32, u32>::new();
 
     let mut i = 5usize;
     while i < words.len() {
@@ -349,6 +378,7 @@ fn split_combined_image_samplers(words: &[u32]) -> Vec<u32> {
                 let var_id = instr[2];
                 let sc = instr[3];
                 if sc == SC_UNIFORM_CONSTANT {
+                    uc_vars.insert(var_id);
                     if let Some(&si_type) = combined_ptr_types.get(&rt) {
                         combined_vars.insert(var_id, si_type);
                     }
@@ -358,13 +388,19 @@ fn split_combined_image_samplers(words: &[u32]) -> Vec<u32> {
                 let target = instr[1];
                 let dec = instr[2];
                 let val = instr[3];
-                if combined_vars.contains_key(&target) {
+                if uc_vars.contains(&target) {
                     match dec {
                         DEC_DESCRIPTOR_SET => {
-                            var_ds.insert(target, val);
+                            all_uc_ds.insert(target, val);
+                            if combined_vars.contains_key(&target) {
+                                var_ds.insert(target, val);
+                            }
                         }
                         DEC_BINDING => {
-                            var_binding.insert(target, val);
+                            all_uc_binding.insert(target, val);
+                            if combined_vars.contains_key(&target) {
+                                var_binding.insert(target, val);
+                            }
                         }
                         _ => {}
                     }
@@ -379,9 +415,55 @@ fn split_combined_image_samplers(words: &[u32]) -> Vec<u32> {
         return words.to_vec();
     }
 
+    // ── Compute compact sampler bindings ─────────────────────────────────────
+    // For each descriptor set group G:
+    //   max_binding = max over all UC vars in G
+    //   sorted combined = sorted list of combined-sampler bindings in G
+    //   sampler binding for B_i = max_binding + 1 + rank_i
+
+    // max_binding per group (over ALL UC vars, not just combined)
+    let mut max_binding_per_group: HashMap<u32, u32> = HashMap::new();
+    for (&var_id, &b) in &all_uc_binding {
+        let g = all_uc_ds.get(&var_id).copied().unwrap_or(0);
+        max_binding_per_group
+            .entry(g)
+            .and_modify(|m| *m = (*m).max(b))
+            .or_insert(b);
+    }
+
+    // Sorted combined-sampler bindings per group
+    let mut combined_bindings_per_group: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (&var_id, _) in &combined_vars {
+        let g = var_ds.get(&var_id).copied().unwrap_or(0);
+        let b = var_binding.get(&var_id).copied().unwrap_or(0);
+        combined_bindings_per_group.entry(g).or_default().push(b);
+    }
+    for v in combined_bindings_per_group.values_mut() {
+        v.sort_unstable();
+        v.dedup();
+    }
+
+    // sampler_binding_for: var_id → compact sampler binding number
+    let mut sampler_binding_for: HashMap<u32, u32> = HashMap::new();
+    for (&var_id, _) in &combined_vars {
+        let g = var_ds.get(&var_id).copied().unwrap_or(0);
+        let b = var_binding.get(&var_id).copied().unwrap_or(0);
+        let max_b = max_binding_per_group.get(&g).copied().unwrap_or(b);
+        let sorted = combined_bindings_per_group
+            .get(&g)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let samp_b = compact_sampler_binding(b, max_b, sorted);
+        sampler_binding_for.insert(var_id, samp_b);
+        log::debug!(
+            "CIS split: group={} tex_binding={} → sampler_binding={}",
+            g, b, samp_b
+        );
+    }
+
     // ── Phase 2: find OpLoad of combined vars inside function bodies ──────────
 
-    // combined_loads: load_result_id → var_id (the pointer that was loaded from)
+    // combined_loads: load_result_id → var_id
     let mut combined_loads = HashMap::<u32, u32>::new();
     let mut in_fn = false;
     let mut i = 5usize;
@@ -468,20 +550,16 @@ fn split_combined_image_samplers(words: &[u32]) -> Vec<u32> {
 
     // ── Phase 4: build rewritten binary ──────────────────────────────────────
 
-    // Rough capacity estimate
-    let extra =
-        (need_sampler_type as usize) * 2
+    let extra = (need_sampler_type as usize) * 2
         + (need_ptr_sampler as usize) * 4
-        + combined_vars.len() * 4          // per companion variable
-        + combined_loads.len() * 9;        // per expanded load (3 instr, 2+4+3 extra words)
+        + combined_vars.len() * 4
+        + combined_loads.len() * 9;
 
     let mut out: Vec<u32> = Vec::with_capacity(words.len() + extra);
 
     // Updated header (new bound)
     out.extend_from_slice(&[words[0], words[1], words[2], next_id, words[4]]);
 
-    // Track whether we've inserted the new type declarations yet.
-    // We insert them right before the first global (non-function-local) OpVariable.
     let mut types_inserted = false;
     let mut in_fn = false;
 
@@ -490,7 +568,6 @@ fn split_combined_image_samplers(words: &[u32]) -> Vec<u32> {
         let wc = (words[i] >> 16) as usize;
         let op = words[i] & 0xFFFF;
         if wc == 0 || i + wc > words.len() {
-            // Malformed tail — copy as-is and stop
             out.extend_from_slice(&words[i..]);
             break;
         }
@@ -499,8 +576,7 @@ fn split_combined_image_samplers(words: &[u32]) -> Vec<u32> {
         match op {
             // ── Global variable declaration ───────────────────────────────────
             OP_VARIABLE if !in_fn => {
-                // On the first global variable we've seen, emit any new type
-                // declarations that must precede variables.
+                // On the first global variable, emit any new type declarations.
                 if !types_inserted {
                     if need_sampler_type {
                         out.extend_from_slice(&[(2 << 16) | OP_TYPE_SAMPLER, sampler_type_id]);
@@ -516,10 +592,9 @@ fn split_combined_image_samplers(words: &[u32]) -> Vec<u32> {
                     types_inserted = true;
                 }
 
-                // Emit the original variable.
                 out.extend_from_slice(instr);
 
-                // If it's a combined image sampler, add the companion sampler variable.
+                // If this is a combined image sampler var, append its companion sampler.
                 let var_id = instr[2];
                 if let Some(&samp_var) = companion_samp_var.get(&var_id) {
                     out.extend_from_slice(&[
@@ -548,13 +623,16 @@ fn split_combined_image_samplers(words: &[u32]) -> Vec<u32> {
                             ]);
                         }
                         DEC_BINDING => {
-                            // Synthetic sampler slot: binding | 0x8000_0000
-                            // This is safe because Vulkan limits bindings to < 2^16.
+                            // Use compact sampler binding (stays within WebGPU's 1000 limit).
+                            let samp_b = sampler_binding_for
+                                .get(&target)
+                                .copied()
+                                .unwrap_or(val + 1);
                             out.extend_from_slice(&[
                                 (4 << 16) | OP_DECORATE,
                                 samp_var,
                                 DEC_BINDING,
-                                val | 0x8000_0000,
+                                samp_b,
                             ]);
                         }
                         _ => {}
@@ -585,17 +663,17 @@ fn split_combined_image_samplers(words: &[u32]) -> Vec<u32> {
                     let r_img = img_load_id[&result_id];
                     let r_samp = samp_load_id[&result_id];
                     let samp_var = companion_samp_var[&var_id];
-                    let si_type = instr[1]; // TypeSampledImage used as result type
-                    let extra_wc = wc - 4; // optional memory access words
+                    let si_type = instr[1];
+                    let extra_wc = wc - 4;
 
-                    // (1) Image load (same pointer, new result ID, optional mem-access)
+                    // (1) Image load (same pointer, new result ID)
                     out.push(((4 + extra_wc as u32) << 16) | OP_LOAD);
                     out.push(si_type);
                     out.push(r_img);
                     out.push(pointer_id);
                     out.extend_from_slice(&instr[4..]);
 
-                    // (2) Sampler load (no memory access needed for Handle types)
+                    // (2) Sampler load (no memory-access operand needed for Handle types)
                     out.extend_from_slice(&[
                         (4 << 16) | OP_LOAD,
                         sampler_type_id,
@@ -603,7 +681,7 @@ fn split_combined_image_samplers(words: &[u32]) -> Vec<u32> {
                         samp_var,
                     ]);
 
-                    // (3) Combine into a proper SampledImage — gives %R its original ID
+                    // (3) Combine into OpSampledImage — result keeps original ID %R
                     out.extend_from_slice(&[
                         (5 << 16) | OP_SAMPLED_IMAGE,
                         si_type,
@@ -637,35 +715,33 @@ mod tests {
     #[test]
     fn test_shader_cache_basic() {
         let cache = ShaderCache::new();
-
-        // Test cache initialization
         assert_eq!(cache.cache_size(), 0);
-
-        // Test cache clear
         cache.clear();
         assert_eq!(cache.cache_size(), 0);
     }
 
     #[test]
     fn test_push_constant_transform() {
-        // Test the transformation logic without complex module creation
-        // The actual transformation will be tested when real shaders are processed
-
         let mut module = naga::Module::default();
-
-        // Test with empty module - should succeed without errors
         let result = ShaderCache::transform_push_constants_to_uniform(&mut module);
         assert!(result.is_ok(), "Transform should succeed on empty module");
     }
 
     #[test]
     fn test_no_combined_samplers_passthrough() {
-        // A minimal valid SPIR-V with no combined image samplers should pass through unchanged
-        // (just check the fast-path: spv_has_combined_image_samplers returns false)
         let not_spirv = vec![0u32, 1, 2, 3, 4];
         assert!(!spv_has_combined_image_samplers(&not_spirv));
 
         let minimal_header = vec![SPV_MAGIC, 0x00010000u32, 0, 1, 0];
         assert!(!spv_has_combined_image_samplers(&minimal_header));
+    }
+
+    #[test]
+    fn test_compact_sampler_binding() {
+        // Single combined sampler at binding 0, max_binding=2 → sampler at 3
+        assert_eq!(compact_sampler_binding(0, 2, &[0]), 3);
+        // Two combined samplers at 0, 2 with max_binding=5
+        assert_eq!(compact_sampler_binding(0, 5, &[0, 2]), 6);
+        assert_eq!(compact_sampler_binding(2, 5, &[0, 2]), 7);
     }
 }

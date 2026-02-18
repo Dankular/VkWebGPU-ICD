@@ -11,6 +11,7 @@ use crate::device;
 use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
 use crate::{buffer, image, sampler};
+use std::collections::HashMap;
 
 pub static DESCRIPTOR_SET_LAYOUT_ALLOCATOR: Lazy<HandleAllocator<VkDescriptorSetLayoutData>> =
     Lazy::new(|| HandleAllocator::new());
@@ -22,6 +23,9 @@ pub static DESCRIPTOR_SET_ALLOCATOR: Lazy<HandleAllocator<VkDescriptorSetData>> 
 pub struct VkDescriptorSetLayoutData {
     pub device: vk::Device,
     pub bindings: Vec<vk::DescriptorSetLayoutBinding<'static>>,
+    /// Maps each CIS texture binding → compact synthetic sampler binding.
+    /// Formula: max_uc_binding + 1 + rank (matches shader.rs::compact_sampler_binding).
+    pub cis_sampler_binding: HashMap<u32, u32>,
     #[cfg(not(target_arch = "wasm32"))]
     pub wgpu_layout: Arc<wgpu::BindGroupLayout>,
 }
@@ -94,21 +98,28 @@ pub unsafe fn create_descriptor_set_layout(
         bindings.len()
     );
 
+    // Compute compact sampler bindings for CIS descriptors before building wgpu_layout,
+    // so the same numbers are used in both the BindGroupLayout and the BindGroup.
+    let cis_sampler_binding = compute_cis_sampler_binding_map(&bindings);
+
     let device_data = device::get_device_data(device)
         .ok_or_else(|| VkError::InvalidHandle("Invalid device".to_string()))?;
 
     #[cfg(not(target_arch = "wasm32"))]
     let wgpu_layout = {
-        // For COMBINED_IMAGE_SAMPLER, we emit both a Texture entry and a Sampler entry.
-        // The sampler is placed at a synthetic binding = original_binding | 0x8000_0000
-        // so it doesn't collide with real bindings (which are always < 2^16 in practice).
+        // For COMBINED_IMAGE_SAMPLER, emit both a Texture entry and a Sampler entry.
+        // The sampler goes at a compact synthetic slot (max_uc_binding + 1 + rank) so
+        // it stays within WebGPU's maxBindingsPerBindGroup limit of 1000.
         let mut entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
         for binding in &bindings {
             entries.push(vk_to_wgpu_bind_group_layout_entry(binding));
             if binding.descriptor_type == vk::DescriptorType::COMBINED_IMAGE_SAMPLER {
-                // Add the paired sampler entry at the synthetic slot.
+                let samp_b = cis_sampler_binding
+                    .get(&binding.binding)
+                    .copied()
+                    .unwrap_or(binding.binding + 1);
                 entries.push(wgpu::BindGroupLayoutEntry {
-                    binding: combined_sampler_binding(binding.binding),
+                    binding: samp_b,
                     visibility: vk_to_wgpu_shader_stages(binding.stage_flags),
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -128,6 +139,7 @@ pub unsafe fn create_descriptor_set_layout(
     let layout_data = VkDescriptorSetLayoutData {
         device,
         bindings,
+        cis_sampler_binding,
         #[cfg(not(target_arch = "wasm32"))]
         wgpu_layout: Arc::new(wgpu_layout),
     };
@@ -138,11 +150,53 @@ pub unsafe fn create_descriptor_set_layout(
     Ok(())
 }
 
-/// Synthetic binding slot for the sampler half of a COMBINED_IMAGE_SAMPLER.
-/// Must not collide with real Vulkan descriptor bindings (which top out well under 2^16).
-#[inline]
-fn combined_sampler_binding(texture_binding: u32) -> u32 {
-    texture_binding | 0x8000_0000
+/// Returns true for descriptor types that map to UniformConstant storage class in SPIR-V
+/// (textures, samplers, combined image samplers). Used to compute max_binding correctly
+/// for the compact sampler binding formula — buffer types are excluded.
+fn is_uniform_constant_type(dt: vk::DescriptorType) -> bool {
+    matches!(
+        dt,
+        vk::DescriptorType::SAMPLED_IMAGE
+            | vk::DescriptorType::STORAGE_IMAGE
+            | vk::DescriptorType::SAMPLER
+            | vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+            | vk::DescriptorType::INPUT_ATTACHMENT
+    )
+}
+
+/// Compute the compact sampler-binding map for all COMBINED_IMAGE_SAMPLER entries in
+/// a descriptor set layout.
+///
+/// For each CIS binding B at rank R (0-indexed among sorted CIS bindings):
+///   synthetic_sampler_binding = max_uc_binding + 1 + R
+///
+/// `max_uc_binding` is the maximum binding number among all UniformConstant-typed
+/// descriptors in the layout — this excludes buffers so that the result matches the
+/// formula used in `shader.rs::compact_sampler_binding`, which operates over SPIR-V
+/// UniformConstant variables only.
+///
+/// All resulting binding numbers are small (< 1000) and safe for WebGPU's
+/// `maxBindingsPerBindGroup` limit.
+fn compute_cis_sampler_binding_map(bindings: &[vk::DescriptorSetLayoutBinding]) -> HashMap<u32, u32> {
+    let max_uc_binding = bindings
+        .iter()
+        .filter(|b| is_uniform_constant_type(b.descriptor_type))
+        .map(|b| b.binding)
+        .max()
+        .unwrap_or(0);
+
+    let mut cis: Vec<u32> = bindings
+        .iter()
+        .filter(|b| b.descriptor_type == vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .map(|b| b.binding)
+        .collect();
+    cis.sort_unstable();
+    cis.dedup();
+
+    cis.iter()
+        .enumerate()
+        .map(|(rank, &b)| (b, max_uc_binding + 1 + rank as u32))
+        .collect()
 }
 
 pub unsafe fn destroy_descriptor_set_layout(
@@ -563,11 +617,16 @@ fn rebuild_bind_group(
                 // Texture at the original binding.
                 collected.push((layout_binding.binding, Collected::View(wgpu_view)));
 
-                // Sampler at the synthetic slot that matches the layout we created.
+                // Sampler at the compact synthetic slot that matches the BindGroupLayout.
                 if *sampler != vk::Sampler::null() {
                     if let Some(samp_data) = sampler::get_sampler_data(*sampler) {
+                        let samp_b = layout_data
+                            .cis_sampler_binding
+                            .get(&layout_binding.binding)
+                            .copied()
+                            .unwrap_or(layout_binding.binding + 1);
                         collected.push((
-                            combined_sampler_binding(layout_binding.binding),
+                            samp_b,
                             Collected::Sampler(Arc::clone(&samp_data.wgpu_sampler)),
                         ));
                     }
