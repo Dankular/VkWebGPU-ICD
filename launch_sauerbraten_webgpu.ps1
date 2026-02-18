@@ -1,4 +1,4 @@
-# Sauerbraten via OpenGL → Vulkan → WebGPU Translation
+# Sauerbraten via OpenGL -> Vulkan -> WebGPU Translation
 # ======================================================
 
 Write-Host "Sauerbraten WebGPU Launch Script" -ForegroundColor Cyan
@@ -13,13 +13,13 @@ $env:GALLIUM_DRIVER = "zink"
 
 Write-Host "Translation Chain:" -ForegroundColor Green
 Write-Host "  Sauerbraten (OpenGL)" -ForegroundColor White
-Write-Host "      ↓" -ForegroundColor DarkGray
-Write-Host "  Mesa Zink (OpenGL → Vulkan)" -ForegroundColor White
-Write-Host "      ↓" -ForegroundColor DarkGray
-Write-Host "  VkWebGPU ICD (Vulkan → WebGPU)" -ForegroundColor White
-Write-Host "      ↓" -ForegroundColor DarkGray
-Write-Host "  wgpu (WebGPU → DX12)" -ForegroundColor White
-Write-Host "      ↓" -ForegroundColor DarkGray
+Write-Host "      |" -ForegroundColor DarkGray
+Write-Host "  Mesa Zink (OpenGL -> Vulkan)" -ForegroundColor White
+Write-Host "      |" -ForegroundColor DarkGray
+Write-Host "  VkWebGPU ICD (Vulkan -> WebGPU)" -ForegroundColor White
+Write-Host "      |" -ForegroundColor DarkGray
+Write-Host "  wgpu (WebGPU -> DX12)" -ForegroundColor White
+Write-Host "      |" -ForegroundColor DarkGray
 Write-Host "  DirectX 12" -ForegroundColor White
 Write-Host ""
 
@@ -50,11 +50,10 @@ if (-not (Test-Path $zinkDll)) {
     exit 1
 }
 
-Write-Host "✓ Mesa Zink DLL found" -ForegroundColor Green
-Write-Host "✓ VkWebGPU ICD configured" -ForegroundColor Green
+Write-Host "Mesa Zink DLL found" -ForegroundColor Green
+Write-Host "VkWebGPU ICD configured" -ForegroundColor Green
 Write-Host ""
 Write-Host "Launching Sauerbraten..." -ForegroundColor Green
-Write-Host "Press Ctrl+C in game to stop" -ForegroundColor DarkGray
 Write-Host ""
 
 # Run from bin64 directory
@@ -63,9 +62,3 @@ cd $sauerbratenPath
 
 Write-Host ""
 Write-Host "Sauerbraten exited." -ForegroundColor Yellow
-Write-Host ""
-Write-Host "If you saw errors, check the output above for clues." -ForegroundColor Cyan
-Write-Host "Common issues:" -ForegroundColor Yellow
-Write-Host "- Missing Mesa DLLs: Copy all x64 files from Mesa archive" -ForegroundColor White
-Write-Host "- Vulkan version mismatch: Zink might need Vulkan 1.3+" -ForegroundColor White
-Write-Host "- Missing extensions: Check logs for required extensions" -ForegroundColor White

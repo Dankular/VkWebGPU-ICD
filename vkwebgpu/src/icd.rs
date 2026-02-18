@@ -108,8 +108,8 @@ pub unsafe extern "system" fn vkEnumerateInstanceVersion(p_api_version: *mut u32
         return vk::Result::ERROR_INITIALIZATION_FAILED;
     }
 
-    // Report Vulkan 1.2 support
-    *p_api_version = vk::API_VERSION_1_2;
+    // Report Vulkan 1.3 support (required by Zink)
+    *p_api_version = vk::API_VERSION_1_3;
     vk::Result::SUCCESS
 }
 

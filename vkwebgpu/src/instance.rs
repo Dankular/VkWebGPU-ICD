@@ -254,7 +254,7 @@ pub unsafe fn get_physical_device_properties(
 
     let properties = &mut *p_properties;
 
-    properties.api_version = vk::make_api_version(0, 1, 2, 0);
+    properties.api_version = vk::make_api_version(0, 1, 3, 0);
     properties.driver_version = vk::make_api_version(0, 0, 1, 0);
     properties.vendor_id = pd_data.adapter_info.vendor_id;
     properties.device_id = pd_data.adapter_info.device_id;
