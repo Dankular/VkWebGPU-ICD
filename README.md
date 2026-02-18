@@ -2,11 +2,65 @@
 
 A Vulkan Installable Client Driver (ICD) that translates Vulkan API calls to WebGPU, enabling Vulkan applications (including DXVK-translated DirectX games) to run in web browsers.
 
-## Architecture
+## Primary Use Case: DirectX Games in the Browser via CheerpX + Proton
+
+Run unmodified Windows DirectX games inside a browser tab — no plugin, no native install — by stacking three compatibility layers:
 
 ```
-Game → DirectX → DXVK → Vulkan API → VkWebGPU ICD → WebGPU → Browser GPU
+Windows Game
+    │  DirectX 9 / 10 / 11 calls
+    ▼
+DXVK  (part of Proton)
+    │  Translates D3D → Vulkan
+    ▼
+VkWebGPU ICD  ◄── this project
+    │  Translates Vulkan → WebGPU
+    ▼
+WebGPU  (browser GPU API)
+    │
+    ▼
+Browser / GPU
 ```
+
+### How the layers fit together
+
+| Layer | What it does | Where it runs |
+|-------|-------------|---------------|
+| **CheerpX** | x86-64 Linux VM in WebAssembly; runs unmodified Linux ELF binaries in the browser | Browser (WASM) |
+| **SteamOS / Proton** | Windows→Linux compatibility runtime (Wine + DXVK + Steam Play) running inside CheerpX | CheerpX VM |
+| **DXVK** | Translates Direct3D 9/10/11 API calls to Vulkan; ships inside Proton | CheerpX VM |
+| **VkWebGPU ICD** | Translates Vulkan API calls to WebGPU; registered as the sole Vulkan driver | CheerpX VM → Browser |
+| **WebGPU** | Modern browser GPU API backed by D3D12 / Metal / Vulkan natively | Browser |
+
+### Deployment inside CheerpX
+
+Configure VkWebGPU ICD as the Vulkan driver inside the CheerpX Linux environment:
+
+```bash
+# Inside the CheerpX SteamOS image
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/vkwebgpu_icd.json
+export DXVK_HUD=0          # optional overlay
+export PROTON_USE_WINED3D=0 # force DXVK (Vulkan path)
+
+# Launch game via Proton as normal
+proton run game.exe
+```
+
+The call chain at runtime:
+1. `game.exe` makes D3D11 calls through Wine's D3D shim
+2. DXVK intercepts and issues Vulkan commands
+3. VkWebGPU ICD receives Vulkan commands, translates to WebGPU
+4. WebGPU submits GPU work to the browser's native GPU API
+5. Frames appear in the CheerpX canvas element
+
+### Why this works
+
+- CheerpX executes the x86-64 Proton/Wine/DXVK binaries directly — no recompilation needed
+- VkWebGPU ICD is a standard Vulkan ICD (`.so` on Linux) that any `VK_DRIVER_FILES`-aware Vulkan loader will pick up, including the one inside the CheerpX VM
+- WebGPU is available in all major browsers (Chrome, Firefox, Safari), so no additional browser permissions or extensions are required
+- DXVK's Vulkan usage patterns (push constants, descriptor indexing, dynamic rendering) are the primary target for VkWebGPU's compatibility work
+
+## Architecture
 
 ## Status
 
@@ -140,54 +194,48 @@ replay_commands(cmd_buffer, backend) -> WebGPU CommandBuffer
 3. Arc references kept alive during replay
 4. Unsafe lifetime extension with documented safety guarantees
 
-## Next Steps
+## Roadmap
 
-### Phase 2: Testing & Validation (Current)
+### Phase 1: Core ICD ✅ Complete
 
-**Immediate Goals:**
-1. ✅ Core implementation complete
-2. 🔄 **Test with actual Vulkan applications**
-3. 🔄 **Validate DXVK compatibility**
-4. 🔄 **Integration testing**
+- Vulkan 1.3 ICD entry points, dispatchable handle protocol
+- Full SPIR-V → WGSL shader translation via Naga
+- Deferred command recording + replay at submit time
+- Swapchain presentation via wgpu surface
+- Triangle test app renders correctly end-to-end
 
-**Testing Priorities:**
-- Simple Vulkan triangle/cube applications
-- DXVK-translated DirectX 9/11 games
-- Compute shader workloads
-- Buffer/texture uploads and downloads
+### Phase 2: DXVK Compatibility 🔄 In Progress
 
-**Known Limitations (Acceptable for v1.0):**
-- WASM implementation (stub returns FeatureNotSupported)
-- No secondary command buffers (may not be needed for DXVK)
-- Pipeline cache unimplemented (no-op; no correctness impact)
+DXVK exercises a specific Vulkan subset. Priority work items:
 
-### Phase 3: Game Compatibility
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Push constants | ✅ Ring-buffer emulation | DXVK uses heavily |
+| Descriptor indexing | ✅ | Required extension |
+| Dynamic rendering | ✅ | VK_KHR_dynamic_rendering |
+| Timeline semaphores | ✅ | VK_KHR_timeline_semaphore |
+| `vkCmdBlitImage` | 🔄 | Needed for mipmap gen |
+| Sparse resources | 🔄 | Stub; most games don't need |
+| Secondary command buffers | 🔄 | Stub; DXVK may require |
+| Pipeline cache | 🔄 | No-op; no correctness impact |
 
-**Target: Enter the Gungeon via CheerpX + Proton**
+### Phase 3: CheerpX Integration
 
-1. Map DXVK-specific Vulkan usage patterns
-2. Implement push constants (may need uniform buffer emulation)
-3. Test with progressively complex games:
-   - Simple 2D games (sprite rendering)
+1. Cross-compile ICD to x86-64 Linux shared library (`libvkwebgpu.so`)
+2. Mount into CheerpX filesystem image alongside Proton
+3. Set `VK_DRIVER_FILES` in the CheerpX environment config
+4. Verify Proton/DXVK enumerates the ICD and selects it
+5. Test with progressively complex games:
+   - 2D sprite-based titles (simplest DXVK usage)
    - 3D games with basic shaders
-   - Enter the Gungeon (final target)
-4. Performance profiling and optimization
+   - Enter the Gungeon (initial milestone)
 
-### Phase 4: Production Deployment
+### Phase 4: Production
 
-1. Package as `.so`/`.dll` for CheerpX
-2. Configure as Vulkan ICD via `VK_DRIVER_FILES`
-3. Integration with Proton/WINE runtime
-4. Documentation and examples
-5. Performance benchmarking
-
-### Future Enhancements
-
-**Not Blocking:**
-- WASM target implementation (web-sys API integration)
-- Secondary command buffers (if DXVK requires)
-- Advanced validation layers
-- Performance optimizations (command buffer recycling, allocation pooling)
+- Performance profiling; GPU timestamp queries
+- Shader compilation caching across sessions
+- WASM target (web-sys WebGPU bindings) for pure-browser deployment
+- Public demo page via CheerpX embed
 
 ## Command Coverage
 
@@ -298,42 +346,29 @@ Comprehensive format tables:
 cargo build --release
 ```
 
-The ICD will be built to `target/release/vkwebgpu_icd.dll` (Windows), `libvkwebgpu_icd.so` (Linux), or `libvkwebgpu_icd.dylib` (macOS).
+Output: `target/release/vkwebgpu.dll` (Windows) · `libvkwebgpu.so` (Linux)
 
-### Test the ICD
-
-Use the included minimal test application (no Vulkan SDK required):
+### Run the triangle test
 
 ```bash
-cd test_app
-run_test.bat
+# Windows — set ICD and run the bundled test app
+set VK_DRIVER_FILES=%CD%\vkwebgpu_icd.json
+cd test_app && cargo run --release
 ```
 
-This will test basic Vulkan operations:
-- Instance creation
-- Device enumeration
-- Extension queries
-- Logical device creation
+Renders an orange triangle through the full Vulkan → WebGPU stack and exits cleanly.
 
-See `test_app/README.md` for details.
-
-### Use with Vulkan Applications
-
-Set the `VK_DRIVER_FILES` environment variable to point to the ICD manifest:
+### Use with any Vulkan application
 
 ```bash
 # Windows
 set VK_DRIVER_FILES=C:\path\to\VkWebGPU-ICD\vkwebgpu_icd.json
 
-# Linux/macOS
-export VK_DRIVER_FILES=/path/to/VkWebGPU-ICD/vkwebgpu_icd_linux.json
-```
+# Linux
+export VK_DRIVER_FILES=/path/to/VkWebGPU-ICD/vkwebgpu_icd.json
 
-Then run any Vulkan application:
-
-```bash
-vulkaninfo  # View ICD information
-vkcube      # Run Vulkan cube demo
+vulkaninfo   # enumerate the ICD
+vkcube       # spin a textured cube
 ```
 
 ## Dependencies
