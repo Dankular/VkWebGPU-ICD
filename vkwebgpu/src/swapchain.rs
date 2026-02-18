@@ -3,7 +3,6 @@
 use ash::vk::{self, Handle};
 use log::debug;
 use once_cell::sync::Lazy;
-use std::sync::Arc;
 
 use crate::error::Result;
 use crate::handle::HandleAllocator;
@@ -72,7 +71,7 @@ pub unsafe fn destroy_swapchain_khr(
 }
 
 pub unsafe fn get_swapchain_images_khr(
-    swapchain: vk::SwapchainKHR,
+    _swapchain: vk::SwapchainKHR,
     p_swapchain_image_count: *mut u32,
     p_swapchain_images: *mut vk::Image,
 ) -> Result<()> {
@@ -86,7 +85,7 @@ pub unsafe fn get_swapchain_images_khr(
 }
 
 pub unsafe fn acquire_next_image_khr(
-    swapchain: vk::SwapchainKHR,
+    _swapchain: vk::SwapchainKHR,
     _timeout: u64,
     _semaphore: vk::Semaphore,
     _fence: vk::Fence,

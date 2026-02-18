@@ -73,7 +73,7 @@ pub unsafe fn allocate_command_buffers(
 
 pub unsafe fn begin_command_buffer(
     command_buffer: vk::CommandBuffer,
-    p_begin_info: *const vk::CommandBufferBeginInfo,
+    _p_begin_info: *const vk::CommandBufferBeginInfo,
 ) -> Result<()> {
     let cmd_data = COMMAND_BUFFER_ALLOCATOR
         .get(command_buffer.as_raw())
@@ -115,20 +115,20 @@ pub unsafe fn end_command_buffer(command_buffer: vk::CommandBuffer) -> Result<()
 }
 
 pub unsafe fn cmd_begin_render_pass(
-    command_buffer: vk::CommandBuffer,
-    p_render_pass_begin: *const vk::RenderPassBeginInfo,
+    _command_buffer: vk::CommandBuffer,
+    _p_render_pass_begin: *const vk::RenderPassBeginInfo,
     _contents: vk::SubpassContents,
 ) {
     debug!("Begin render pass");
     // Simplified for now
 }
 
-pub unsafe fn cmd_end_render_pass(command_buffer: vk::CommandBuffer) {
+pub unsafe fn cmd_end_render_pass(_command_buffer: vk::CommandBuffer) {
     debug!("End render pass");
 }
 
 pub unsafe fn cmd_bind_pipeline(
-    command_buffer: vk::CommandBuffer,
+    _command_buffer: vk::CommandBuffer,
     _pipeline_bind_point: vk::PipelineBindPoint,
     pipeline: vk::Pipeline,
 ) {
@@ -136,12 +136,12 @@ pub unsafe fn cmd_bind_pipeline(
 }
 
 pub unsafe fn cmd_bind_descriptor_sets(
-    command_buffer: vk::CommandBuffer,
+    _command_buffer: vk::CommandBuffer,
     _pipeline_bind_point: vk::PipelineBindPoint,
     _layout: vk::PipelineLayout,
     _first_set: u32,
     descriptor_set_count: u32,
-    p_descriptor_sets: *const vk::DescriptorSet,
+    _p_descriptor_sets: *const vk::DescriptorSet,
     _dynamic_offset_count: u32,
     _p_dynamic_offsets: *const u32,
 ) {
@@ -149,7 +149,7 @@ pub unsafe fn cmd_bind_descriptor_sets(
 }
 
 pub unsafe fn cmd_draw(
-    command_buffer: vk::CommandBuffer,
+    _command_buffer: vk::CommandBuffer,
     vertex_count: u32,
     instance_count: u32,
     first_vertex: u32,
@@ -162,7 +162,7 @@ pub unsafe fn cmd_draw(
 }
 
 pub unsafe fn cmd_draw_indexed(
-    command_buffer: vk::CommandBuffer,
+    _command_buffer: vk::CommandBuffer,
     index_count: u32,
     instance_count: u32,
     first_index: u32,
@@ -176,11 +176,11 @@ pub unsafe fn cmd_draw_indexed(
 }
 
 pub unsafe fn cmd_bind_vertex_buffers(
-    command_buffer: vk::CommandBuffer,
+    _command_buffer: vk::CommandBuffer,
     first_binding: u32,
     binding_count: u32,
-    p_buffers: *const vk::Buffer,
-    p_offsets: *const vk::DeviceSize,
+    _p_buffers: *const vk::Buffer,
+    _p_offsets: *const vk::DeviceSize,
 ) {
     debug!(
         "Bind {} vertex buffers starting at binding {}",
@@ -189,8 +189,8 @@ pub unsafe fn cmd_bind_vertex_buffers(
 }
 
 pub unsafe fn cmd_bind_index_buffer(
-    command_buffer: vk::CommandBuffer,
-    buffer: vk::Buffer,
+    _command_buffer: vk::CommandBuffer,
+    _buffer: vk::Buffer,
     offset: vk::DeviceSize,
     index_type: vk::IndexType,
 ) {
@@ -201,28 +201,28 @@ pub unsafe fn cmd_bind_index_buffer(
 }
 
 pub unsafe fn cmd_copy_buffer(
-    command_buffer: vk::CommandBuffer,
-    src_buffer: vk::Buffer,
-    dst_buffer: vk::Buffer,
+    _command_buffer: vk::CommandBuffer,
+    _src_buffer: vk::Buffer,
+    _dst_buffer: vk::Buffer,
     region_count: u32,
-    p_regions: *const vk::BufferCopy,
+    _p_regions: *const vk::BufferCopy,
 ) {
     debug!("Copy buffer: {} regions", region_count);
 }
 
 pub unsafe fn cmd_copy_buffer_to_image(
-    command_buffer: vk::CommandBuffer,
-    src_buffer: vk::Buffer,
-    dst_image: vk::Image,
+    _command_buffer: vk::CommandBuffer,
+    _src_buffer: vk::Buffer,
+    _dst_image: vk::Image,
     _dst_image_layout: vk::ImageLayout,
     region_count: u32,
-    p_regions: *const vk::BufferImageCopy,
+    _p_regions: *const vk::BufferImageCopy,
 ) {
     debug!("Copy buffer to image: {} regions", region_count);
 }
 
 pub unsafe fn cmd_pipeline_barrier(
-    command_buffer: vk::CommandBuffer,
+    _command_buffer: vk::CommandBuffer,
     _src_stage_mask: vk::PipelineStageFlags,
     _dst_stage_mask: vk::PipelineStageFlags,
     _dependency_flags: vk::DependencyFlags,

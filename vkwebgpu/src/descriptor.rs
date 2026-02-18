@@ -7,12 +7,9 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-use crate::buffer;
 use crate::device;
 use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
-use crate::image;
-use crate::sampler;
 
 pub static DESCRIPTOR_SET_LAYOUT_ALLOCATOR: Lazy<HandleAllocator<VkDescriptorSetLayoutData>> =
     Lazy::new(|| HandleAllocator::new());

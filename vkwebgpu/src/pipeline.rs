@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use crate::device;
 use crate::error::{Result, VkError};
-use crate::format;
 use crate::handle::HandleAllocator;
 
 pub static PIPELINE_LAYOUT_ALLOCATOR: Lazy<HandleAllocator<VkPipelineLayoutData>> =
@@ -198,7 +197,7 @@ pub unsafe fn create_graphics_pipelines(
 
 #[cfg(not(target_arch = "wasm32"))]
 unsafe fn create_wgpu_render_pipeline(
-    device: vk::Device,
+    _device: vk::Device,
     create_info: &vk::GraphicsPipelineCreateInfo,
     device_data: &crate::device::VkDeviceData,
 ) -> Result<wgpu::RenderPipeline> {
@@ -304,7 +303,7 @@ unsafe fn create_wgpu_render_pipeline(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn process_vertex_input_state(
-    vis: &vk::PipelineVertexInputStateCreateInfo,
+    _vis: &vk::PipelineVertexInputStateCreateInfo,
 ) -> Vec<wgpu::VertexBufferLayout<'static>> {
     // Simplified: return empty for now
     Vec::new()
@@ -312,7 +311,7 @@ fn process_vertex_input_state(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn process_color_blend_state(
-    cbs: &vk::PipelineColorBlendStateCreateInfo,
+    _cbs: &vk::PipelineColorBlendStateCreateInfo,
 ) -> Vec<Option<wgpu::ColorTargetState>> {
     vec![Some(wgpu::ColorTargetState {
         format: wgpu::TextureFormat::Bgra8Unorm,

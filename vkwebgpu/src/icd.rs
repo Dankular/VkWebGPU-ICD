@@ -13,7 +13,7 @@ pub const VK_ICD_INTERFACE_VERSION: u32 = 5;
 /// Get the instance proc addr - core ICD function
 #[no_mangle]
 pub unsafe extern "system" fn vk_icdGetInstanceProcAddr(
-    instance: vk::Instance,
+    _instance: vk::Instance,
     p_name: *const c_char,
 ) -> vk::PFN_vkVoidFunction {
     if p_name.is_null() {

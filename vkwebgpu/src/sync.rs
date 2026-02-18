@@ -4,7 +4,6 @@ use ash::vk::{self, Handle};
 use log::debug;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use std::sync::Arc;
 
 use crate::error::Result;
 use crate::handle::HandleAllocator;
@@ -59,7 +58,7 @@ pub unsafe fn destroy_fence(
 }
 
 pub unsafe fn reset_fences(
-    device: vk::Device,
+    _device: vk::Device,
     fence_count: u32,
     p_fences: *const vk::Fence,
 ) -> Result<()> {
@@ -76,13 +75,13 @@ pub unsafe fn reset_fences(
 }
 
 pub unsafe fn wait_for_fences(
-    device: vk::Device,
+    _device: vk::Device,
     fence_count: u32,
     p_fences: *const vk::Fence,
     wait_all: vk::Bool32,
-    timeout: u64,
+    _timeout: u64,
 ) -> Result<()> {
-    let fences = std::slice::from_raw_parts(p_fences, fence_count as usize);
+    let _fences = std::slice::from_raw_parts(p_fences, fence_count as usize);
 
     debug!("Waiting for {} fences (wait_all={})", fence_count, wait_all);
 
