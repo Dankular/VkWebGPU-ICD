@@ -1,3 +1,11 @@
 /target/
 **/*.rs.bk
 Cargo.lock
+
+# Build artifacts
+*.dll
+*.so
+*.dylib
+*.pdb
+*.lib
+*.exp
