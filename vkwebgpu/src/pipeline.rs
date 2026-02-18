@@ -2,8 +2,9 @@
 //! Maps VkPipeline to WebGPU GPURenderPipeline/GPUComputePipeline
 
 use ash::vk::{self, Handle};
-use log::debug;
+use log::{debug, warn};
 use once_cell::sync::Lazy;
+use std::ffi::CStr;
 use std::sync::Arc;
 
 use crate::device;
@@ -126,12 +127,10 @@ pub unsafe fn create_pipeline_layout(
             layout_datas.iter().map(|data| &*data.wgpu_layout).collect();
 
         // If this pipeline layout has push constants, prepend the push constant bind group layout
-        // at set 0. This shifts all user descriptor sets by +1.
-        // TODO: This is a simplification - ideally we should only add this to pipelines that
-        // actually use push constants, but for DXVK compatibility we add it to all layouts.
+        // at set 0. This shifts all user descriptor sets by +1. The shader transformation in
+        // shader.rs applies the same shift to WGSL binding group numbers.
         let has_push_constants = !push_constant_ranges.is_empty();
         if has_push_constants {
-            // Insert push constant bind group layout at index 0
             bind_group_layouts.insert(0, device_data.push_constant_buffer.bind_group_layout());
         }
 
@@ -216,11 +215,73 @@ unsafe fn create_wgpu_render_pipeline(
         .get(create_info.layout.as_raw())
         .ok_or_else(|| VkError::InvalidHandle("Invalid pipeline layout".to_string()))?;
 
-    // Process shader stages
-    let stages = std::slice::from_raw_parts(create_info.p_stages, create_info.stage_count as usize);
+    // ── 1. Collect render target formats ─────────────────────────────────────────
+    // Priority order:
+    //   a) VkPipelineRenderingCreateInfo from the pNext chain (dynamic rendering / Vulkan 1.3)
+    //   b) VkRenderPass + subpass index (traditional render pass path)
+    //   c) Fallback defaults if neither is available
+    let mut color_vk_formats: Vec<vk::Format> = Vec::new();
+    let mut depth_vk_format = vk::Format::UNDEFINED;
 
-    let mut vertex_module = None;
-    let mut fragment_module = None;
+    // Walk the pNext chain for VkPipelineRenderingCreateInfo
+    let mut p_next = create_info.p_next as *const vk::BaseInStructure;
+    while !p_next.is_null() {
+        let base = &*p_next;
+        if base.s_type == vk::StructureType::PIPELINE_RENDERING_CREATE_INFO {
+            let pri = &*(p_next as *const vk::PipelineRenderingCreateInfo);
+            if pri.color_attachment_count > 0 && !pri.p_color_attachment_formats.is_null() {
+                color_vk_formats = std::slice::from_raw_parts(
+                    pri.p_color_attachment_formats,
+                    pri.color_attachment_count as usize,
+                )
+                .to_vec();
+            }
+            depth_vk_format = pri.depth_attachment_format;
+            debug!(
+                "Pipeline: read {} color format(s) and depth format {:?} from VkPipelineRenderingCreateInfo",
+                color_vk_formats.len(),
+                depth_vk_format
+            );
+            break;
+        }
+        p_next = base.p_next;
+    }
+
+    // Fall back to render pass attachment formats when not using dynamic rendering
+    if color_vk_formats.is_empty() && create_info.render_pass != vk::RenderPass::null() {
+        if let Some(rp_data) = crate::render_pass::get_render_pass_data(create_info.render_pass) {
+            let subpass_idx = create_info.subpass as usize;
+            if let Some(subpass) = rp_data.subpasses.get(subpass_idx) {
+                color_vk_formats = subpass
+                    .color_attachment_indices
+                    .iter()
+                    .filter_map(|&idx| rp_data.attachments.get(idx as usize).map(|a| a.format))
+                    .collect();
+                if let Some(depth_idx) = subpass.depth_stencil_attachment_index {
+                    depth_vk_format = rp_data
+                        .attachments
+                        .get(depth_idx as usize)
+                        .map(|a| a.format)
+                        .unwrap_or(vk::Format::UNDEFINED);
+                }
+                debug!(
+                    "Pipeline: read {} color format(s) and depth format {:?} from render pass subpass {}",
+                    color_vk_formats.len(),
+                    depth_vk_format,
+                    subpass_idx
+                );
+            }
+        }
+    }
+
+    // ── 2. Process shader stages ──────────────────────────────────────────────────
+    let stages =
+        std::slice::from_raw_parts(create_info.p_stages, create_info.stage_count as usize);
+
+    let mut vertex_module: Option<wgpu::ShaderModule> = None;
+    let mut vertex_entry = String::from("main");
+    let mut fragment_module: Option<wgpu::ShaderModule> = None;
+    let mut fragment_entry = String::from("main");
 
     for stage in stages {
         let shader_data = SHADER_MODULE_ALLOCATOR
@@ -240,34 +301,95 @@ unsafe fn create_wgpu_render_pipeline(
                     source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(&wgsl)),
                 });
 
+        // Use the entry point name specified in the Vulkan stage info (pName).
+        // This is the name of the OpEntryPoint in the SPIR-V, which Naga preserves
+        // as the function name in the generated WGSL.
+        let entry_name = if !stage.p_name.is_null() {
+            CStr::from_ptr(stage.p_name)
+                .to_str()
+                .unwrap_or("main")
+                .to_string()
+        } else {
+            String::from("main")
+        };
+
         if stage.stage.contains(vk::ShaderStageFlags::VERTEX) {
+            vertex_entry = entry_name;
             vertex_module = Some(module);
         } else if stage.stage.contains(vk::ShaderStageFlags::FRAGMENT) {
+            fragment_entry = entry_name;
             fragment_module = Some(module);
+        } else {
+            // Geometry and tessellation stages are not supported by WebGPU.
+            // Log a warning and skip rather than failing pipeline creation, since DXVK
+            // may include these stages but the pipeline can still partially function.
+            warn!(
+                "Shader stage {:?} is not supported by WebGPU and will be skipped",
+                stage.stage
+            );
         }
     }
 
-    // Get vertex input state
-    let vertex_buffers = if !create_info.p_vertex_input_state.is_null() {
+    // ── 3. Vertex input state (no Box::leak) ─────────────────────────────────────
+    // We build owned Vec<VertexAttribute> per binding, then borrow them into
+    // VertexBufferLayout<'_> within this same scope (all_binding_attrs outlives
+    // vertex_buffers because it is declared first in the same scope).
+    let mut all_binding_attrs: Vec<Vec<wgpu::VertexAttribute>> = Vec::new();
+    let mut owned_binding_descs: Vec<vk::VertexInputBindingDescription> = Vec::new();
+
+    if !create_info.p_vertex_input_state.is_null() {
         let vis = &*create_info.p_vertex_input_state;
-        process_vertex_input_state(vis)
-    } else {
-        Vec::new()
-    };
+        if vis.vertex_binding_description_count > 0
+            && !vis.p_vertex_binding_descriptions.is_null()
+        {
+            let bindings = std::slice::from_raw_parts(
+                vis.p_vertex_binding_descriptions,
+                vis.vertex_binding_description_count as usize,
+            );
+            let attr_slice = if vis.vertex_attribute_description_count > 0
+                && !vis.p_vertex_attribute_descriptions.is_null()
+            {
+                std::slice::from_raw_parts(
+                    vis.p_vertex_attribute_descriptions,
+                    vis.vertex_attribute_description_count as usize,
+                )
+            } else {
+                &[]
+            };
 
-    // Get color targets
-    let color_targets = if !create_info.p_color_blend_state.is_null() {
-        let cbs = &*create_info.p_color_blend_state;
-        process_color_blend_state(cbs)
-    } else {
-        vec![Some(wgpu::ColorTargetState {
-            format: wgpu::TextureFormat::Bgra8Unorm,
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
-        })]
-    };
+            for binding in bindings {
+                let attrs: Vec<wgpu::VertexAttribute> = attr_slice
+                    .iter()
+                    .filter(|attr| attr.binding == binding.binding)
+                    .map(|attr| wgpu::VertexAttribute {
+                        format: vk_to_wgpu_vertex_format(attr.format),
+                        offset: attr.offset as u64,
+                        shader_location: attr.location,
+                    })
+                    .collect();
+                all_binding_attrs.push(attrs);
+            }
+            owned_binding_descs = bindings.to_vec();
+        }
+    }
 
-    // Primitive state
+    // Borrow from all_binding_attrs; the borrow checker ensures all_binding_attrs
+    // lives at least as long as vertex_buffers (it is declared before vertex_buffers).
+    let vertex_buffers: Vec<wgpu::VertexBufferLayout> = owned_binding_descs
+        .iter()
+        .zip(all_binding_attrs.iter())
+        .map(|(binding, attrs)| wgpu::VertexBufferLayout {
+            array_stride: binding.stride as u64,
+            step_mode: if binding.input_rate == vk::VertexInputRate::VERTEX {
+                wgpu::VertexStepMode::Vertex
+            } else {
+                wgpu::VertexStepMode::Instance
+            },
+            attributes: attrs.as_slice(),
+        })
+        .collect();
+
+    // ── 4. Primitive state ────────────────────────────────────────────────────────
     let primitive = {
         let topology = if !create_info.p_input_assembly_state.is_null() {
             let ias = &*create_info.p_input_assembly_state;
@@ -312,12 +434,92 @@ unsafe fn create_wgpu_render_pipeline(
         }
     };
 
-    // Depth/stencil state
+    // ── 5. Color targets with real formats ────────────────────────────────────────
+    let color_targets: Vec<Option<wgpu::ColorTargetState>> = {
+        let (att_count, att_slice): (usize, &[vk::PipelineColorBlendAttachmentState]) =
+            if !create_info.p_color_blend_state.is_null() {
+                let cbs = &*create_info.p_color_blend_state;
+                let count = cbs.attachment_count as usize;
+                let slice = if count > 0 && !cbs.p_attachments.is_null() {
+                    std::slice::from_raw_parts(cbs.p_attachments, count)
+                } else {
+                    &[]
+                };
+                (count, slice)
+            } else {
+                (0, &[])
+            };
+
+        // Number of targets is the max of blend state attachment count and format count.
+        // When using dynamic rendering, color_vk_formats is the authoritative count.
+        let num_targets = att_count.max(color_vk_formats.len());
+
+        if num_targets == 0 {
+            // No color attachments (depth-only pass or unknown configuration).
+            Vec::new()
+        } else {
+            (0..num_targets)
+                .map(|i| {
+                    // Resolve the wgpu format: prefer the explicit format list, fall back to B8G8R8A8_UNORM.
+                    let vk_fmt = color_vk_formats
+                        .get(i)
+                        .copied()
+                        .unwrap_or(vk::Format::B8G8R8A8_UNORM);
+                    let wgpu_fmt = crate::format::vk_to_wgpu_format(vk_fmt)
+                        .unwrap_or(wgpu::TextureFormat::Bgra8Unorm);
+
+                    let att = att_slice.get(i);
+                    let blend = att.and_then(|a| {
+                        if a.blend_enable == vk::TRUE {
+                            Some(wgpu::BlendState {
+                                color: wgpu::BlendComponent {
+                                    src_factor: vk_to_wgpu_blend_factor(a.src_color_blend_factor),
+                                    dst_factor: vk_to_wgpu_blend_factor(a.dst_color_blend_factor),
+                                    operation: vk_to_wgpu_blend_operation(a.color_blend_op),
+                                },
+                                alpha: wgpu::BlendComponent {
+                                    src_factor: vk_to_wgpu_blend_factor(a.src_alpha_blend_factor),
+                                    dst_factor: vk_to_wgpu_blend_factor(a.dst_alpha_blend_factor),
+                                    operation: vk_to_wgpu_blend_operation(a.alpha_blend_op),
+                                },
+                            })
+                        } else {
+                            None
+                        }
+                    });
+                    let write_mask = att
+                        .map(|a| vk_to_wgpu_color_write_mask(a.color_write_mask))
+                        .unwrap_or(wgpu::ColorWrites::ALL);
+
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu_fmt,
+                        blend,
+                        write_mask,
+                    })
+                })
+                .collect()
+        }
+    };
+
+    // ── 6. Depth/stencil state with real format ───────────────────────────────────
     let depth_stencil = if !create_info.p_depth_stencil_state.is_null() {
         let dss = &*create_info.p_depth_stencil_state;
-        if dss.depth_test_enable == vk::TRUE || dss.depth_write_enable == vk::TRUE {
+        if dss.depth_test_enable == vk::TRUE
+            || dss.depth_write_enable == vk::TRUE
+            || dss.stencil_test_enable == vk::TRUE
+        {
+            // Resolve depth format from the information we gathered above.
+            let depth_wgpu_format = if depth_vk_format != vk::Format::UNDEFINED {
+                crate::format::vk_to_wgpu_format(depth_vk_format)
+                    .unwrap_or(wgpu::TextureFormat::Depth24Plus)
+            } else {
+                // No explicit format provided; default to Depth24Plus which is
+                // universally supported and covers D24S8 and plain depth cases.
+                wgpu::TextureFormat::Depth24Plus
+            };
+
             Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24Plus, // TODO: Get from render pass
+                format: depth_wgpu_format,
                 depth_write_enabled: dss.depth_write_enable == vk::TRUE,
                 depth_compare: vk_to_wgpu_compare_function(dss.depth_compare_op),
                 stencil: wgpu::StencilState {
@@ -335,6 +537,11 @@ unsafe fn create_wgpu_render_pipeline(
         None
     };
 
+    // ── 7. Create the render pipeline ─────────────────────────────────────────────
+    let vertex_mod = vertex_module
+        .as_ref()
+        .ok_or_else(|| VkError::InvalidHandle("Graphics pipeline has no vertex shader".to_string()))?;
+
     let pipeline =
         device_data
             .backend
@@ -343,8 +550,8 @@ unsafe fn create_wgpu_render_pipeline(
                 label: Some("VkGraphicsPipeline"),
                 layout: Some(&layout_data.wgpu_layout),
                 vertex: wgpu::VertexState {
-                    module: vertex_module.as_ref().unwrap(),
-                    entry_point: "main",
+                    module: vertex_mod,
+                    entry_point: vertex_entry.as_str(),
                     buffers: &vertex_buffers,
                     compilation_options: Default::default(),
                 },
@@ -353,7 +560,7 @@ unsafe fn create_wgpu_render_pipeline(
                 multisample: wgpu::MultisampleState::default(),
                 fragment: fragment_module.as_ref().map(|module| wgpu::FragmentState {
                     module,
-                    entry_point: "main",
+                    entry_point: fragment_entry.as_str(),
                     targets: &color_targets,
                     compilation_options: Default::default(),
                 }),
@@ -405,6 +612,16 @@ pub unsafe fn create_compute_pipelines(
                         source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(&wgsl)),
                     });
 
+            // Use the entry point name from the Vulkan stage info.
+            let entry_name = if !create_info.stage.p_name.is_null() {
+                CStr::from_ptr(create_info.stage.p_name)
+                    .to_str()
+                    .unwrap_or("main")
+                    .to_string()
+            } else {
+                String::from("main")
+            };
+
             device_data
                 .backend
                 .device
@@ -412,7 +629,7 @@ pub unsafe fn create_compute_pipelines(
                     label: Some("VkComputePipeline"),
                     layout: Some(&layout_data.wgpu_layout),
                     module: &module,
-                    entry_point: "main",
+                    entry_point: entry_name.as_str(),
                     compilation_options: Default::default(),
                 })
         };
@@ -429,96 +646,6 @@ pub unsafe fn create_compute_pipelines(
     }
 
     Ok(())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn process_vertex_input_state(
-    vis: &vk::PipelineVertexInputStateCreateInfo,
-) -> Vec<wgpu::VertexBufferLayout<'static>> {
-    if vis.vertex_binding_description_count == 0 {
-        return Vec::new();
-    }
-
-    let bindings = unsafe {
-        std::slice::from_raw_parts(
-            vis.p_vertex_binding_descriptions,
-            vis.vertex_binding_description_count as usize,
-        )
-    };
-
-    let attributes = unsafe {
-        std::slice::from_raw_parts(
-            vis.p_vertex_attribute_descriptions,
-            vis.vertex_attribute_description_count as usize,
-        )
-    };
-
-    bindings
-        .iter()
-        .map(|binding| {
-            let binding_attrs: Vec<wgpu::VertexAttribute> = attributes
-                .iter()
-                .filter(|attr| attr.binding == binding.binding)
-                .map(|attr| wgpu::VertexAttribute {
-                    format: vk_to_wgpu_vertex_format(attr.format),
-                    offset: attr.offset as u64,
-                    shader_location: attr.location,
-                })
-                .collect();
-
-            wgpu::VertexBufferLayout {
-                array_stride: binding.stride as u64,
-                step_mode: if binding.input_rate == vk::VertexInputRate::VERTEX {
-                    wgpu::VertexStepMode::Vertex
-                } else {
-                    wgpu::VertexStepMode::Instance
-                },
-                attributes: Box::leak(binding_attrs.into_boxed_slice()),
-            }
-        })
-        .collect()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn process_color_blend_state(
-    cbs: &vk::PipelineColorBlendStateCreateInfo,
-) -> Vec<Option<wgpu::ColorTargetState>> {
-    if cbs.attachment_count == 0 {
-        return vec![Some(wgpu::ColorTargetState {
-            format: wgpu::TextureFormat::Bgra8Unorm,
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
-    }
-
-    let attachments =
-        unsafe { std::slice::from_raw_parts(cbs.p_attachments, cbs.attachment_count as usize) };
-
-    attachments
-        .iter()
-        .map(|attachment| {
-            Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Bgra8Unorm, // TODO: Get from render pass
-                blend: if attachment.blend_enable == vk::TRUE {
-                    Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: vk_to_wgpu_blend_factor(attachment.src_color_blend_factor),
-                            dst_factor: vk_to_wgpu_blend_factor(attachment.dst_color_blend_factor),
-                            operation: vk_to_wgpu_blend_operation(attachment.color_blend_op),
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: vk_to_wgpu_blend_factor(attachment.src_alpha_blend_factor),
-                            dst_factor: vk_to_wgpu_blend_factor(attachment.dst_alpha_blend_factor),
-                            operation: vk_to_wgpu_blend_operation(attachment.alpha_blend_op),
-                        },
-                    })
-                } else {
-                    None
-                },
-                write_mask: vk_to_wgpu_color_write_mask(attachment.color_write_mask),
-            })
-        })
-        .collect()
 }
 
 #[cfg(not(target_arch = "wasm32"))]

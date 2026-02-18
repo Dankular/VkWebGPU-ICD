@@ -65,8 +65,11 @@ impl ShaderCache {
                 VkError::ShaderTranslationFailed(format!("SPIR-V parse error: {:?}", e))
             })?;
 
-        // CRITICAL: Transform push constants to uniform buffers
-        // This is required because WebGPU doesn't support push constants directly
+        // CRITICAL: Transform push constants to uniform buffers.
+        // WebGPU doesn't support push constants. When push constants are present we:
+        //   1. Shift all existing user resource bindings +1 group (to match the pipeline layout
+        //      which inserts the push constant bind group at index 0).
+        //   2. Map the push constant block to group=0, binding=0.
         Self::transform_push_constants_to_uniform(&mut module)?;
 
         // Validate the module
@@ -94,52 +97,72 @@ impl ShaderCache {
         Ok(wgsl)
     }
 
-    /// Transform push constants to uniform buffers
+    /// Transform push constants to uniform buffers, correcting binding group numbers.
     ///
-    /// WebGPU doesn't support push constants, so we transform them to uniform buffers.
-    /// Push constant blocks are converted to uniform buffers at group=0, binding=0.
-    /// This matches the binding used by our push constant emulation in the pipeline.
+    /// Pipeline layout inserts the push constant bind group at WebGPU group 0, which shifts
+    /// all user descriptor sets up by one. This function applies the same shift to WGSL
+    /// resource bindings so that the shader agrees with the pipeline layout:
+    ///
+    ///   - All non-push-constant resource bindings have their `group` incremented by 1.
+    ///   - The push constant block is remapped to group=0, binding=0.
+    ///
+    /// When no push constants are present the function is a no-op.
     fn transform_push_constants_to_uniform(module: &mut naga::Module) -> Result<()> {
         use naga::{AddressSpace, ResourceBinding};
 
-        let mut transformed_count = 0;
+        // First pass: check if any push constants exist.
+        let has_push_constants = module
+            .global_variables
+            .iter()
+            .any(|(_, var)| var.space == AddressSpace::PushConstant);
 
-        // Iterate through all global variables to find push constants
+        if !has_push_constants {
+            return Ok(());
+        }
+
+        // Second pass: shift all existing non-push-constant resource bindings by +1 group.
+        // This keeps user descriptors aligned with the pipeline layout which will have
+        // user bind groups starting at index 1 (index 0 reserved for push constants).
+        let mut shifted_count = 0usize;
+        for (_, var) in module.global_variables.iter_mut() {
+            if var.space != AddressSpace::PushConstant {
+                if let Some(ref mut binding) = var.binding {
+                    binding.group += 1;
+                    shifted_count += 1;
+                }
+            }
+        }
+
+        // Third pass: remap push constants to the emulated uniform buffer at group=0, binding=0.
+        let mut transformed_count = 0usize;
         for (handle, var) in module.global_variables.iter_mut() {
             if var.space == AddressSpace::PushConstant {
-                // Log the transformation
                 if let Some(ref name) = var.name {
                     log::debug!(
-                        "Transforming push constant variable '{}' to uniform buffer",
+                        "Transforming push constant variable '{}' to uniform buffer at group=0, binding=0",
                         name
                     );
                 } else {
                     log::debug!(
-                        "Transforming push constant variable {:?} to uniform buffer",
+                        "Transforming push constant variable {:?} to uniform buffer at group=0, binding=0",
                         handle
                     );
                 }
 
-                // Change address space from PushConstant to Uniform
                 var.space = AddressSpace::Uniform;
-
-                // Set binding to group=0, binding=0
-                // This is where we'll bind our emulated push constant buffer
                 var.binding = Some(ResourceBinding {
                     group: 0,
                     binding: 0,
                 });
-
                 transformed_count += 1;
             }
         }
 
-        if transformed_count > 0 {
-            log::info!(
-                "Transformed {} push constant block(s) to uniform buffer(s)",
-                transformed_count
-            );
-        }
+        log::info!(
+            "Push constant transform: {} block(s) → uniform at (0,0); {} user binding(s) shifted +1 group",
+            transformed_count,
+            shifted_count
+        );
 
         Ok(())
     }
