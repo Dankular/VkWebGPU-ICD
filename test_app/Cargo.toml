@@ -7,3 +7,9 @@ edition = "2021"
 ash = "0.38"
 winit = "0.29"
 raw-window-handle = "0.6"
+env_logger = "0.11"
+log = "0.4"
+
+[build-dependencies]
+# Compiles the WGSL triangle shaders to SPIR-V at build time.
+naga = { version = "0.20", features = ["wgsl-in", "spv-out"] }
