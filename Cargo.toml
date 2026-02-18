@@ -2,6 +2,9 @@
 members = [
     "vkwebgpu",
 ]
+exclude = [
+    "test_app",
+]
 resolver = "2"
 
 [workspace.package]

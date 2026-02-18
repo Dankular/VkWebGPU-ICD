@@ -262,6 +262,52 @@ Comprehensive format tables:
 - ETC2/EAC compression
 - ASTC compression
 
+## Quick Start
+
+### Build the ICD
+
+```bash
+cargo build --release
+```
+
+The ICD will be built to `target/release/vkwebgpu_icd.dll` (Windows), `libvkwebgpu_icd.so` (Linux), or `libvkwebgpu_icd.dylib` (macOS).
+
+### Test the ICD
+
+Use the included minimal test application (no Vulkan SDK required):
+
+```bash
+cd test_app
+run_test.bat
+```
+
+This will test basic Vulkan operations:
+- Instance creation
+- Device enumeration
+- Extension queries
+- Logical device creation
+
+See `test_app/README.md` for details.
+
+### Use with Vulkan Applications
+
+Set the `VK_DRIVER_FILES` environment variable to point to the ICD manifest:
+
+```bash
+# Windows
+set VK_DRIVER_FILES=C:\path\to\VkWebGPU-ICD\vkwebgpu_icd.json
+
+# Linux/macOS
+export VK_DRIVER_FILES=/path/to/VkWebGPU-ICD/vkwebgpu_icd_linux.json
+```
+
+Then run any Vulkan application:
+
+```bash
+vulkaninfo  # View ICD information
+vkcube      # Run Vulkan cube demo
+```
+
 ## Dependencies
 
 - `ash` 0.38 - Vulkan bindings

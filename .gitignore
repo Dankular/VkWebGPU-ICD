@@ -9,3 +9,5 @@ Cargo.lock
 *.pdb
 *.lib
 *.exp
+test_app/target/
+test_app/Cargo.lock

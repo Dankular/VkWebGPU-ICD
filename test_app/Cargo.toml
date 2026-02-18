@@ -1,0 +1,9 @@
+[package]
+name = "vk_test_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ash = "0.38"
+winit = "0.29"
+raw-window-handle = "0.6"
