@@ -20,6 +20,66 @@ use crate::handle::HandleAllocator;
 pub static COMMAND_BUFFER_ALLOCATOR: Lazy<HandleAllocator<VkCommandBufferData>> =
     Lazy::new(|| HandleAllocator::new());
 
+// ---------------------------------------------------------------------------
+// WGSL blit-image shader
+// ---------------------------------------------------------------------------
+// Used by the BlitImage2 replay arm to implement vkCmdBlitImage via a
+// fullscreen-triangle render pass.  A uniform buffer carries the UV transform
+// that maps [0,1] across the destination viewport to the source sub-region.
+//
+// Uniform layout (16 bytes, std140-compatible):
+//   offset 0:  src_uv_offset (vec2<f32>)
+//   offset 8:  src_uv_scale  (vec2<f32>)
+//
+// UV derivation (vertex shader):
+//   base_uv goes from (0,0) at the NDC top-left to (1,1) at NDC bottom-right.
+//   The viewport is set to the destination sub-region so this maps exactly to
+//   [dst_x0,dst_y0]..[dst_x1,dst_y1] in the destination texture.
+//   The final sample UV is:  src_uv_offset + base_uv * src_uv_scale
+//   which maps the viewport back to the source sub-region.
+#[cfg(not(target_arch = "wasm32"))]
+const BLIT_IMAGE_WGSL: &str = r#"
+struct BlitUniforms {
+    src_uv_offset: vec2<f32>,
+    src_uv_scale:  vec2<f32>,
+};
+
+struct VertOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0)       uv:  vec2<f32>,
+};
+
+@group(0) @binding(0) var src_tex:  texture_2d<f32>;
+@group(0) @binding(1) var src_samp: sampler;
+@group(0) @binding(2) var<uniform> u: BlitUniforms;
+
+// Fullscreen triangle covering NDC [-1,1]^2.
+// base_uv interpolates as (0,0) at top-left -> (1,1) at bottom-right
+// (Y is already in the right direction for wgpu/texture-UV convention).
+@vertex
+fn vs_blit(@builtin(vertex_index) vi: u32) -> VertOut {
+    var pos = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    var base_uv = array<vec2<f32>, 3>(
+        vec2<f32>(0.0,  1.0),
+        vec2<f32>(2.0,  1.0),
+        vec2<f32>(0.0, -1.0),
+    );
+    var o: VertOut;
+    o.pos = vec4<f32>(pos[vi], 0.0, 1.0);
+    o.uv  = u.src_uv_offset + base_uv[vi] * u.src_uv_scale;
+    return o;
+}
+
+@fragment
+fn fs_blit(in: VertOut) -> @location(0) vec4<f32> {
+    return textureSample(src_tex, src_samp, in.uv);
+}
+"#;
+
 /// Attachment info for dynamic rendering (vkCmdBeginRendering)
 #[derive(Clone)]
 pub struct RenderingAttachment {
@@ -3428,8 +3488,350 @@ pub fn replay_commands(
                 }
             }
 
-            RecordedCommand::BlitImage2 { .. } => {
-                debug!("Replay: BlitImage2 (no-op - use compute shader for real blit)");
+            RecordedCommand::BlitImage2 {
+                src_image,
+                src_image_layout: _,
+                dst_image,
+                dst_image_layout: _,
+                regions,
+                filter,
+            } => {
+                debug!("Replay: BlitImage2: {} region(s)", regions.len());
+                drop(active_render_pass.take());
+                drop(active_compute_pass.take());
+
+                let src_data = match image::get_image_data(*src_image) {
+                    Some(d) => d,
+                    None => {
+                        debug!("BlitImage2: invalid src image handle, skipping");
+                        continue;
+                    }
+                };
+                let dst_data = match image::get_image_data(*dst_image) {
+                    Some(d) => d,
+                    None => {
+                        debug!("BlitImage2: invalid dst image handle, skipping");
+                        continue;
+                    }
+                };
+
+                let src_guard = src_data.wgpu_texture.read();
+                let dst_guard = dst_data.wgpu_texture.read();
+                let src_wgpu = match src_guard.as_ref() {
+                    Some(t) => t,
+                    None => {
+                        debug!("BlitImage2: src image not GPU-bound, skipping");
+                        continue;
+                    }
+                };
+                let dst_wgpu = match dst_guard.as_ref() {
+                    Some(t) => t,
+                    None => {
+                        debug!("BlitImage2: dst image not GPU-bound, skipping");
+                        continue;
+                    }
+                };
+
+                let src_fmt = src_data.format;
+                let dst_fmt = dst_data.format;
+                let formats_match = src_fmt == dst_fmt;
+
+                // Get dst wgpu format — needed for the render pipeline.
+                let dst_wgpu_format = match crate::format::vk_to_wgpu_format(dst_fmt) {
+                    Some(f) => f,
+                    None => {
+                        debug!("BlitImage2: unsupported dst format {:?}, skipping", dst_fmt);
+                        continue;
+                    }
+                };
+
+                // Build shader + pipeline + sampler once for all regions
+                // (they only depend on dst_wgpu_format and filter mode).
+                let filter_mode = if *filter == vk::Filter::LINEAR {
+                    wgpu::FilterMode::Linear
+                } else {
+                    wgpu::FilterMode::Nearest
+                };
+
+                let shader = backend.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("blit_image_shader"),
+                    source: wgpu::ShaderSource::Wgsl(BLIT_IMAGE_WGSL.into()),
+                });
+                let blit_bgl = backend.device.create_bind_group_layout(
+                    &wgpu::BindGroupLayoutDescriptor {
+                        label: Some("blit_image_bgl"),
+                        entries: &[
+                            // binding 0: src texture (2-D, float, filterable)
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 0,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Texture {
+                                    sample_type: wgpu::TextureSampleType::Float {
+                                        filterable: true,
+                                    },
+                                    view_dimension: wgpu::TextureViewDimension::D2,
+                                    multisampled: false,
+                                },
+                                count: None,
+                            },
+                            // binding 1: sampler
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 1,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Sampler(
+                                    wgpu::SamplerBindingType::Filtering,
+                                ),
+                                count: None,
+                            },
+                            // binding 2: uniform buffer (src UV offset + scale)
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 2,
+                                visibility: wgpu::ShaderStages::VERTEX,
+                                ty: wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Uniform,
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
+                            },
+                        ],
+                    },
+                );
+                let pipeline_layout =
+                    backend.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("blit_image_pl"),
+                        bind_group_layouts: &[&blit_bgl],
+                        push_constant_ranges: &[],
+                    });
+                let sampler = backend.device.create_sampler(&wgpu::SamplerDescriptor {
+                    label: Some("blit_image_sampler"),
+                    address_mode_u: wgpu::AddressMode::ClampToEdge,
+                    address_mode_v: wgpu::AddressMode::ClampToEdge,
+                    address_mode_w: wgpu::AddressMode::ClampToEdge,
+                    mag_filter: filter_mode,
+                    min_filter: filter_mode,
+                    mipmap_filter: wgpu::FilterMode::Nearest,
+                    ..Default::default()
+                });
+                let pipeline =
+                    backend.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("blit_image_pipeline"),
+                        layout: Some(&pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &shader,
+                            entry_point: "vs_blit",
+                            buffers: &[],
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &shader,
+                            entry_point: "fs_blit",
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: dst_wgpu_format,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleList,
+                            ..Default::default()
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview: None,
+                    });
+
+                for region in regions {
+                    let src_x0 = region.src_offsets[0].x;
+                    let src_y0 = region.src_offsets[0].y;
+                    let src_x1 = region.src_offsets[1].x;
+                    let src_y1 = region.src_offsets[1].y;
+                    let dst_x0 = region.dst_offsets[0].x;
+                    let dst_y0 = region.dst_offsets[0].y;
+                    let dst_x1 = region.dst_offsets[1].x;
+                    let dst_y1 = region.dst_offsets[1].y;
+
+                    let src_w = (src_x1 - src_x0).abs() as u32;
+                    let src_h = (src_y1 - src_y0).abs() as u32;
+                    let dst_w = (dst_x1 - dst_x0).abs() as u32;
+                    let dst_h = (dst_y1 - dst_y0).abs() as u32;
+
+                    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+                        debug!("BlitImage2: zero-size region, skipping");
+                        continue;
+                    }
+
+                    // Fast path: same format, same size, no flip, non-negative offsets
+                    // → copy_texture_to_texture (no shader needed).
+                    let is_simple_copy = formats_match
+                        && src_w == dst_w
+                        && src_h == dst_h
+                        && src_x0 >= 0 && src_y0 >= 0
+                        && dst_x0 >= 0 && dst_y0 >= 0
+                        && src_x1 > src_x0   // no horizontal flip
+                        && src_y1 > src_y0   // no vertical flip
+                        && dst_x1 > dst_x0
+                        && dst_y1 > dst_y0;
+
+                    if is_simple_copy {
+                        debug!(
+                            "BlitImage2: fast-path copy_texture_to_texture {}x{} \
+                             mip {} -> mip {}",
+                            src_w,
+                            src_h,
+                            region.src_subresource.mip_level,
+                            region.dst_subresource.mip_level
+                        );
+                        encoder.copy_texture_to_texture(
+                            wgpu::ImageCopyTexture {
+                                texture: src_wgpu.as_ref(),
+                                mip_level: region.src_subresource.mip_level,
+                                origin: wgpu::Origin3d {
+                                    x: src_x0 as u32,
+                                    y: src_y0 as u32,
+                                    z: region.src_subresource.base_array_layer,
+                                },
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::ImageCopyTexture {
+                                texture: dst_wgpu.as_ref(),
+                                mip_level: region.dst_subresource.mip_level,
+                                origin: wgpu::Origin3d {
+                                    x: dst_x0 as u32,
+                                    y: dst_y0 as u32,
+                                    z: region.dst_subresource.base_array_layer,
+                                },
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::Extent3d {
+                                width: src_w,
+                                height: src_h,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                        continue;
+                    }
+
+                    // Slow path: render-pass blit with UV transform.
+                    // Computes src UV as:  uv = src_uv_offset + base_uv * src_uv_scale
+                    // where base_uv ∈ [0,1] across the dst viewport sub-region.
+                    //
+                    // src_uv_offset = (src_x0, src_y0) / src_mip_dims
+                    // src_uv_scale  = (src_x1 - src_x0, src_y1 - src_y0) / src_mip_dims
+                    // Negative scale values naturally handle flipped blits.
+                    debug!(
+                        "BlitImage2: render-pass blit src=({},{})..({},{}) mip{} \
+                         -> dst=({},{})..({},{}) mip{}",
+                        src_x0, src_y0, src_x1, src_y1,
+                        region.src_subresource.mip_level,
+                        dst_x0, dst_y0, dst_x1, dst_y1,
+                        region.dst_subresource.mip_level,
+                    );
+
+                    let src_mip_w =
+                        (src_data.extent.width >> region.src_subresource.mip_level).max(1) as f32;
+                    let src_mip_h =
+                        (src_data.extent.height >> region.src_subresource.mip_level).max(1) as f32;
+
+                    // Uniform buffer: [src_uv_offset: vec2f, src_uv_scale: vec2f] = 16 bytes
+                    let uniform_data: [f32; 4] = [
+                        src_x0 as f32 / src_mip_w,               // src_uv_offset.u
+                        src_y0 as f32 / src_mip_h,               // src_uv_offset.v
+                        (src_x1 - src_x0) as f32 / src_mip_w,   // src_uv_scale.u
+                        (src_y1 - src_y0) as f32 / src_mip_h,   // src_uv_scale.v
+                    ];
+                    let mut uniform_bytes = [0u8; 16];
+                    uniform_bytes[0..4].copy_from_slice(&uniform_data[0].to_le_bytes());
+                    uniform_bytes[4..8].copy_from_slice(&uniform_data[1].to_le_bytes());
+                    uniform_bytes[8..12].copy_from_slice(&uniform_data[2].to_le_bytes());
+                    uniform_bytes[12..16].copy_from_slice(&uniform_data[3].to_le_bytes());
+
+                    let uniform_buf = backend.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("blit_image_uniform"),
+                        size: 16,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    backend.queue.write_buffer(&uniform_buf, 0, &uniform_bytes);
+
+                    // Texture views for this mip/layer pair
+                    let src_view = src_wgpu.create_view(&wgpu::TextureViewDescriptor {
+                        label: Some("blit_src_view"),
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_mip_level: region.src_subresource.mip_level,
+                        mip_level_count: Some(1),
+                        base_array_layer: region.src_subresource.base_array_layer,
+                        array_layer_count: Some(1),
+                        ..Default::default()
+                    });
+                    let dst_view = dst_wgpu.create_view(&wgpu::TextureViewDescriptor {
+                        label: Some("blit_dst_view"),
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_mip_level: region.dst_subresource.mip_level,
+                        mip_level_count: Some(1),
+                        base_array_layer: region.dst_subresource.base_array_layer,
+                        array_layer_count: Some(1),
+                        ..Default::default()
+                    });
+
+                    let bind_group =
+                        backend.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("blit_image_bg"),
+                            layout: &blit_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(&src_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&sampler),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: uniform_buf.as_entire_binding(),
+                                },
+                            ],
+                        });
+
+                    // Viewport and scissor cover the destination sub-region.
+                    // For flipped dst (dst_x1 < dst_x0 or dst_y1 < dst_y0) we write
+                    // to the same physical rect [min..max]; the flip is encoded in
+                    // the src UV scale (negative) rather than the viewport.
+                    let vp_x = dst_x0.min(dst_x1).max(0) as u32;
+                    let vp_y = dst_y0.min(dst_y1).max(0) as u32;
+
+                    {
+                        let mut pass =
+                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("BlitImage2"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &dst_view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+                        pass.set_pipeline(&pipeline);
+                        pass.set_bind_group(0, &bind_group, &[]);
+                        pass.set_viewport(
+                            vp_x as f32,
+                            vp_y as f32,
+                            dst_w as f32,
+                            dst_h as f32,
+                            0.0,
+                            1.0,
+                        );
+                        pass.set_scissor_rect(vp_x, vp_y, dst_w, dst_h);
+                        pass.draw(0..3, 0..1);
+                    } // render pass dropped here, before per-region resources
+                } // end for region
             }
 
             RecordedCommand::ResolveImage { .. } => {

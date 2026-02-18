@@ -142,7 +142,7 @@ pub unsafe fn bind_image_memory(
             },
         };
 
-        let usage = vk_to_wgpu_texture_usage(image_data.usage);
+        let usage = vk_to_wgpu_texture_usage(image_data.usage, image_data.format);
 
         let wgpu_texture = device_data
             .backend
@@ -296,31 +296,62 @@ pub unsafe fn destroy_image_view(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn vk_to_wgpu_texture_usage(vk_usage: vk::ImageUsageFlags) -> wgpu::TextureUsages {
+fn vk_to_wgpu_texture_usage(
+    vk_usage: vk::ImageUsageFlags,
+    vk_format: vk::Format,
+) -> wgpu::TextureUsages {
     let mut usage = wgpu::TextureUsages::empty();
 
-    if vk_usage.contains(vk::ImageUsageFlags::TRANSFER_SRC) {
-        usage |= wgpu::TextureUsages::COPY_SRC;
+    // Always include copy capabilities so BlitImage and CopyImage always work.
+    // Always include TEXTURE_BINDING so images can be sampled (needed for blit source).
+    usage |= wgpu::TextureUsages::COPY_SRC
+        | wgpu::TextureUsages::COPY_DST
+        | wgpu::TextureUsages::TEXTURE_BINDING;
+
+    // Add RENDER_ATTACHMENT for non-compressed color formats so images can be
+    // blit destinations (vkCmdBlitImage → render-pass blit).
+    // Depth/stencil and compressed formats are excluded: depth/stencil get
+    // RENDER_ATTACHMENT below, compressed formats don't support it.
+    let is_depth_stencil = matches!(
+        vk_format,
+        vk::Format::D16_UNORM
+            | vk::Format::X8_D24_UNORM_PACK32
+            | vk::Format::D32_SFLOAT
+            | vk::Format::S8_UINT
+            | vk::Format::D16_UNORM_S8_UINT
+            | vk::Format::D24_UNORM_S8_UINT
+            | vk::Format::D32_SFLOAT_S8_UINT
+    );
+    let is_compressed = matches!(
+        vk_format,
+        vk::Format::BC1_RGB_UNORM_BLOCK
+            | vk::Format::BC1_RGB_SRGB_BLOCK
+            | vk::Format::BC1_RGBA_UNORM_BLOCK
+            | vk::Format::BC1_RGBA_SRGB_BLOCK
+            | vk::Format::BC2_UNORM_BLOCK
+            | vk::Format::BC2_SRGB_BLOCK
+            | vk::Format::BC3_UNORM_BLOCK
+            | vk::Format::BC3_SRGB_BLOCK
+            | vk::Format::BC4_UNORM_BLOCK
+            | vk::Format::BC4_SNORM_BLOCK
+            | vk::Format::BC5_UNORM_BLOCK
+            | vk::Format::BC5_SNORM_BLOCK
+            | vk::Format::BC6H_UFLOAT_BLOCK
+            | vk::Format::BC6H_SFLOAT_BLOCK
+            | vk::Format::BC7_UNORM_BLOCK
+            | vk::Format::BC7_SRGB_BLOCK
+    );
+    if !is_compressed {
+        usage |= wgpu::TextureUsages::RENDER_ATTACHMENT;
     }
-    if vk_usage.contains(vk::ImageUsageFlags::TRANSFER_DST) {
-        usage |= wgpu::TextureUsages::COPY_DST;
-    }
-    if vk_usage.contains(vk::ImageUsageFlags::SAMPLED) {
-        usage |= wgpu::TextureUsages::TEXTURE_BINDING;
-    }
+
+    // STORAGE_BINDING is only valid for specific formats — add it only when requested.
     if vk_usage.contains(vk::ImageUsageFlags::STORAGE) {
         usage |= wgpu::TextureUsages::STORAGE_BINDING;
     }
-    if vk_usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT) {
-        usage |= wgpu::TextureUsages::RENDER_ATTACHMENT;
-    }
-    if vk_usage.contains(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT) {
-        usage |= wgpu::TextureUsages::RENDER_ATTACHMENT;
-    }
 
-    if usage.is_empty() {
-        usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
-    }
+    // Suppress unused-variable warning for is_depth_stencil (used for documentation clarity).
+    let _ = is_depth_stencil;
 
     usage
 }
