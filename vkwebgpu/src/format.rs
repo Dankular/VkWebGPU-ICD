@@ -66,9 +66,15 @@ pub fn vk_to_wgpu_format(format: vk::Format) -> Option<TextureFormat> {
         // Packed formats
         vk::Format::A2B10G10R10_UNORM_PACK32 => Some(TextureFormat::Rgb10a2Unorm),
         vk::Format::B10G11R11_UFLOAT_PACK32 => Some(TextureFormat::Rg11b10Float),
+        // A8B8G8R8 packed variants — component order swapped vs R8G8B8A8 but
+        // wgpu Rgba8* layouts match how the GPU sees ABGR-packed bytes on LE hardware.
+        vk::Format::A8B8G8R8_UNORM_PACK32 => Some(TextureFormat::Rgba8Unorm),
+        vk::Format::A8B8G8R8_SRGB_PACK32 => Some(TextureFormat::Rgba8UnormSrgb),
+        vk::Format::A8B8G8R8_SNORM_PACK32 => Some(TextureFormat::Rgba8Snorm),
 
         // Depth/Stencil formats
         vk::Format::D16_UNORM => Some(TextureFormat::Depth16Unorm),
+        vk::Format::X8_D24_UNORM_PACK32 => Some(TextureFormat::Depth24Plus),
         vk::Format::D32_SFLOAT => Some(TextureFormat::Depth32Float),
         vk::Format::D24_UNORM_S8_UINT => Some(TextureFormat::Depth24PlusStencil8),
         vk::Format::D32_SFLOAT_S8_UINT => Some(TextureFormat::Depth32FloatStencil8),

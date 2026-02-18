@@ -1792,6 +1792,84 @@ pub unsafe fn cmd_dispatch_base(
     });
 }
 
+// ── Render-pass attachment helpers ────────────────────────────────────────────
+
+/// Returns true if `format` has a depth component.
+fn vk_format_has_depth(format: vk::Format) -> bool {
+    matches!(
+        format,
+        vk::Format::D16_UNORM
+            | vk::Format::D32_SFLOAT
+            | vk::Format::X8_D24_UNORM_PACK32
+            | vk::Format::D24_UNORM_S8_UINT
+            | vk::Format::D32_SFLOAT_S8_UINT
+    )
+}
+
+/// Returns true if `format` has a stencil component.
+fn vk_format_has_stencil(format: vk::Format) -> bool {
+    matches!(
+        format,
+        vk::Format::S8_UINT
+            | vk::Format::D24_UNORM_S8_UINT
+            | vk::Format::D32_SFLOAT_S8_UINT
+    )
+}
+
+/// Per-attachment metadata derived during BeginRenderPass replay.
+#[cfg(not(target_arch = "wasm32"))]
+struct RpAttachInfo {
+    /// True when this framebuffer slot is a depth/stencil attachment.
+    is_depth: bool,
+    has_depth: bool,
+    has_stencil: bool,
+    // Color path
+    color_load: wgpu::LoadOp<wgpu::Color>,
+    color_store: wgpu::StoreOp,
+    // Depth path
+    depth_load: wgpu::LoadOp<f32>,
+    depth_store: wgpu::StoreOp,
+    // Stencil path
+    stencil_load: wgpu::LoadOp<u32>,
+    stencil_store: wgpu::StoreOp,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn rp_load_color(op: vk::AttachmentLoadOp, clear: wgpu::Color) -> wgpu::LoadOp<wgpu::Color> {
+    match op {
+        vk::AttachmentLoadOp::CLEAR => wgpu::LoadOp::Clear(clear),
+        _ => wgpu::LoadOp::Load, // LOAD + DONT_CARE → Load (preserve / undefined content)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn rp_load_depth(op: vk::AttachmentLoadOp, clear: f32) -> wgpu::LoadOp<f32> {
+    match op {
+        vk::AttachmentLoadOp::CLEAR => wgpu::LoadOp::Clear(clear),
+        _ => wgpu::LoadOp::Load,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn rp_load_stencil(op: vk::AttachmentLoadOp, clear: u32) -> wgpu::LoadOp<u32> {
+    match op {
+        vk::AttachmentLoadOp::CLEAR => wgpu::LoadOp::Clear(clear),
+        _ => wgpu::LoadOp::Load,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn rp_store(op: vk::AttachmentStoreOp) -> wgpu::StoreOp {
+    // Only STORE → Store; DONT_CARE and NONE both → Discard.
+    if op == vk::AttachmentStoreOp::STORE {
+        wgpu::StoreOp::Store
+    } else {
+        wgpu::StoreOp::Discard
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
 /// Replay recorded commands to create a WebGPU command buffer
 ///
 /// This function handles the complex lifetime management required to bridge Vulkan's
@@ -1869,7 +1947,7 @@ pub fn replay_commands(
                 // Build color attachments from framebuffer
                 // We need to collect Arc<TextureView> references first, then build descriptors
                 let mut view_arcs: Vec<Arc<wgpu::TextureView>> = Vec::new();
-                let mut attachment_info: Vec<(bool, wgpu::Color, f32)> = Vec::new(); // (is_depth, clear_color, clear_depth)
+                let mut attachment_info: Vec<RpAttachInfo> = Vec::new();
 
                 for (i, &image_view_handle) in fb_data.attachments.iter().enumerate() {
                     let view_data = image::get_image_view_data(image_view_handle)
@@ -1886,41 +1964,71 @@ pub fn replay_commands(
                             .clone()
                     };
 
-                    // Determine if this is a color or depth/stencil attachment
-                    let is_depth_stencil = if i < rp_data.attachments.len() {
-                        let format = rp_data.attachments[i].format;
-                        format == vk::Format::D16_UNORM
-                            || format == vk::Format::D32_SFLOAT
-                            || format == vk::Format::D24_UNORM_S8_UINT
-                            || format == vk::Format::D32_SFLOAT_S8_UINT
-                    } else {
-                        false
-                    };
+                    // Build per-attachment metadata from render pass description
+                    let info = if i < rp_data.attachments.len() {
+                        let att = &rp_data.attachments[i];
+                        let fmt = att.format;
+                        let has_depth = vk_format_has_depth(fmt);
+                        let has_stencil = vk_format_has_stencil(fmt);
 
-                    let (clear_color, clear_depth) = if is_depth_stencil {
-                        let depth = if i < clear_values.len() {
-                            unsafe { clear_values[i].depth_stencil.depth }
-                        } else {
-                            1.0
-                        };
-                        (wgpu::Color::BLACK, depth)
-                    } else {
-                        let color = if i < clear_values.len() {
-                            let cv = unsafe { clear_values[i].color };
-                            wgpu::Color {
-                                r: unsafe { cv.float32[0] } as f64,
-                                g: unsafe { cv.float32[1] } as f64,
-                                b: unsafe { cv.float32[2] } as f64,
-                                a: unsafe { cv.float32[3] } as f64,
+                        if has_depth || has_stencil {
+                            let ds = if i < clear_values.len() {
+                                unsafe { clear_values[i].depth_stencil }
+                            } else {
+                                vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 }
+                            };
+                            RpAttachInfo {
+                                is_depth: true,
+                                has_depth,
+                                has_stencil,
+                                color_load: wgpu::LoadOp::Load,
+                                color_store: wgpu::StoreOp::Discard,
+                                depth_load: rp_load_depth(att.load_op, ds.depth),
+                                depth_store: rp_store(att.store_op),
+                                stencil_load: rp_load_stencil(att.stencil_load_op, ds.stencil),
+                                stencil_store: rp_store(att.stencil_store_op),
                             }
                         } else {
-                            wgpu::Color::BLACK
-                        };
-                        (color, 1.0)
+                            let clear_color = if i < clear_values.len() {
+                                let cv = unsafe { clear_values[i].color };
+                                wgpu::Color {
+                                    r: unsafe { cv.float32[0] } as f64,
+                                    g: unsafe { cv.float32[1] } as f64,
+                                    b: unsafe { cv.float32[2] } as f64,
+                                    a: unsafe { cv.float32[3] } as f64,
+                                }
+                            } else {
+                                wgpu::Color::BLACK
+                            };
+                            RpAttachInfo {
+                                is_depth: false,
+                                has_depth: false,
+                                has_stencil: false,
+                                color_load: rp_load_color(att.load_op, clear_color),
+                                color_store: rp_store(att.store_op),
+                                depth_load: wgpu::LoadOp::Load,
+                                depth_store: wgpu::StoreOp::Discard,
+                                stencil_load: wgpu::LoadOp::Load,
+                                stencil_store: wgpu::StoreOp::Discard,
+                            }
+                        }
+                    } else {
+                        // No attachment description: treat as color with clear
+                        RpAttachInfo {
+                            is_depth: false,
+                            has_depth: false,
+                            has_stencil: false,
+                            color_load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            color_store: wgpu::StoreOp::Store,
+                            depth_load: wgpu::LoadOp::Load,
+                            depth_store: wgpu::StoreOp::Discard,
+                            stencil_load: wgpu::LoadOp::Load,
+                            stencil_store: wgpu::StoreOp::Discard,
+                        }
                     };
 
                     view_arcs.push(wgpu_view_arc);
-                    attachment_info.push((is_depth_stencil, clear_color, clear_depth));
+                    attachment_info.push(info);
                 }
 
                 // Now build the attachment descriptors using unsafe lifetime extension
@@ -1930,31 +2038,37 @@ pub fn replay_commands(
                 let mut depth_stencil_attachment: Option<wgpu::RenderPassDepthStencilAttachment> =
                     None;
 
-                for (_i, (view_arc, (is_depth, clear_color, clear_depth))) in
-                    view_arcs.iter().zip(attachment_info.iter()).enumerate()
-                {
+                for (view_arc, info) in view_arcs.iter().zip(attachment_info.iter()) {
                     let view_ref: &'static wgpu::TextureView =
                         unsafe { std::mem::transmute(view_arc.as_ref()) };
 
-                    if *is_depth {
+                    if info.is_depth {
                         depth_stencil_attachment = Some(wgpu::RenderPassDepthStencilAttachment {
                             view: view_ref,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(*clear_depth),
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(0),
-                                store: wgpu::StoreOp::Store,
-                            }),
+                            depth_ops: if info.has_depth {
+                                Some(wgpu::Operations {
+                                    load: info.depth_load,
+                                    store: info.depth_store,
+                                })
+                            } else {
+                                None
+                            },
+                            stencil_ops: if info.has_stencil {
+                                Some(wgpu::Operations {
+                                    load: info.stencil_load,
+                                    store: info.stencil_store,
+                                })
+                            } else {
+                                None
+                            },
                         });
                     } else {
                         color_attachments.push(Some(wgpu::RenderPassColorAttachment {
                             view: view_ref,
                             resolve_target: None,
                             ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(*clear_color),
-                                store: wgpu::StoreOp::Store,
+                                load: info.color_load,
+                                store: info.color_store,
                             },
                         }));
                     }
@@ -2139,6 +2253,7 @@ pub fn replay_commands(
                         false
                     };
 
+                let mut dyn_offset_cursor = 0usize;
                 for (i, &desc_set_handle) in descriptor_sets.iter().enumerate() {
                     let desc_data = descriptor::get_descriptor_set_data(desc_set_handle)
                         .ok_or_else(|| {
@@ -2170,26 +2285,25 @@ pub fn replay_commands(
                         first_set + i as u32
                     };
 
-                    // Extract dynamic offsets for this set (if any)
-                    // FIXME: This is a simplified implementation that only handles single descriptor sets correctly.
-                    // For multiple descriptor sets with dynamic offsets, proper offset distribution requires
-                    // tracking the number of dynamic descriptors per set from the pipeline layout.
-                    let offsets_slice = if !dynamic_offsets.is_empty() {
-                        if descriptor_sets.len() == 1 {
-                            // Single descriptor set: pass all dynamic offsets to it
-                            dynamic_offsets.as_slice()
-                        } else {
-                            // Multiple descriptor sets: cannot distribute offsets correctly without
-                            // tracking dynamic descriptor counts per set from pipeline layout.
-                            // TODO: Implement proper offset distribution by tracking dynamic counts.
-                            if i == 0 {
-                                debug!("Warning: Multiple descriptor sets with dynamic offsets not fully supported yet");
-                            }
-                            &[]
-                        }
-                    } else {
-                        &[]
-                    };
+                    // Distribute dynamic offsets: count UNIFORM_BUFFER_DYNAMIC and
+                    // STORAGE_BUFFER_DYNAMIC bindings in this set's layout, then slice
+                    // exactly that many offsets from the flat dynamic_offsets array.
+                    let dyn_count = descriptor::get_descriptor_set_layout_data(desc_data.layout)
+                        .map(|ld| {
+                            ld.bindings
+                                .iter()
+                                .filter(|b| {
+                                    b.descriptor_type
+                                        == vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+                                        || b.descriptor_type
+                                            == vk::DescriptorType::STORAGE_BUFFER_DYNAMIC
+                                })
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    let end = (dyn_offset_cursor + dyn_count).min(dynamic_offsets.len());
+                    let offsets_slice = &dynamic_offsets[dyn_offset_cursor..end];
+                    dyn_offset_cursor += dyn_count;
 
                     match *bind_point {
                         vk::PipelineBindPoint::GRAPHICS => {
