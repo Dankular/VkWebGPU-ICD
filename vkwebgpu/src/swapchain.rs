@@ -1,13 +1,15 @@
 //! Vulkan Swapchain implementation (KHR extension)
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 
 use crate::error::Result;
 use crate::handle::HandleAllocator;
 
-pub static SWAPCHAIN_ALLOCATOR: HandleAllocator<VkSwapchainData> = HandleAllocator::new();
+pub static SWAPCHAIN_ALLOCATOR: Lazy<HandleAllocator<VkSwapchainData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkSwapchainData {
     pub device: vk::Device,
@@ -53,7 +55,7 @@ pub unsafe fn create_swapchain_khr(
     };
 
     let swapchain_handle = SWAPCHAIN_ALLOCATOR.allocate(swapchain_data);
-    *p_swapchain = vk::SwapchainKHR::from_raw(swapchain_handle);
+    *p_swapchain = Handle::from_raw(swapchain_handle);
 
     Ok(())
 }

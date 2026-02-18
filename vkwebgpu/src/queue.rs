@@ -1,8 +1,9 @@
 //! Vulkan Queue implementation
 //! Maps VkQueue to WebGPU GPUQueue
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 
 use crate::command_buffer;
@@ -10,7 +11,8 @@ use crate::device;
 use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
 
-pub static QUEUE_ALLOCATOR: HandleAllocator<VkQueueData> = HandleAllocator::new();
+pub static QUEUE_ALLOCATOR: Lazy<HandleAllocator<VkQueueData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkQueueData {
     pub device: vk::Device,
@@ -36,12 +38,12 @@ pub unsafe fn get_device_queue(
     };
 
     let queue_handle = QUEUE_ALLOCATOR.allocate(queue_data);
-    *p_queue = vk::Queue::from_raw(queue_handle);
+    *p_queue = Handle::from_raw(queue_handle);
 
     // Store in device's queue list
     if let Some(device_data) = device::get_device_data(device) {
         let mut queues = device_data.queues.write();
-        queues.push(vk::Queue::from_raw(queue_handle));
+        queues.push(Handle::from_raw(queue_handle));
     }
 }
 

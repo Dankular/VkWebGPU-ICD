@@ -1,15 +1,18 @@
 //! Vulkan Synchronization primitives
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
 use crate::error::Result;
 use crate::handle::HandleAllocator;
 
-pub static FENCE_ALLOCATOR: HandleAllocator<VkFenceData> = HandleAllocator::new();
-pub static SEMAPHORE_ALLOCATOR: HandleAllocator<VkSemaphoreData> = HandleAllocator::new();
+pub static FENCE_ALLOCATOR: Lazy<HandleAllocator<VkFenceData>> =
+    Lazy::new(|| HandleAllocator::new());
+pub static SEMAPHORE_ALLOCATOR: Lazy<HandleAllocator<VkSemaphoreData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkFenceData {
     pub device: vk::Device,
@@ -38,12 +41,16 @@ pub unsafe fn create_fence(
     };
 
     let fence_handle = FENCE_ALLOCATOR.allocate(fence_data);
-    *p_fence = vk::Fence::from_raw(fence_handle);
+    *p_fence = Handle::from_raw(fence_handle);
 
     Ok(())
 }
 
-pub unsafe fn destroy_fence(fence: vk::Fence, _p_allocator: *const vk::AllocationCallbacks) {
+pub unsafe fn destroy_fence(
+    _device: vk::Device,
+    fence: vk::Fence,
+    _p_allocator: *const vk::AllocationCallbacks,
+) {
     if fence == vk::Fence::null() {
         return;
     }
@@ -101,12 +108,13 @@ pub unsafe fn create_semaphore(
     let semaphore_data = VkSemaphoreData { device };
 
     let semaphore_handle = SEMAPHORE_ALLOCATOR.allocate(semaphore_data);
-    *p_semaphore = vk::Semaphore::from_raw(semaphore_handle);
+    *p_semaphore = Handle::from_raw(semaphore_handle);
 
     Ok(())
 }
 
 pub unsafe fn destroy_semaphore(
+    _device: vk::Device,
     semaphore: vk::Semaphore,
     _p_allocator: *const vk::AllocationCallbacks,
 ) {

@@ -1,8 +1,9 @@
 //! Vulkan Command Buffer implementation
 //! Maps VkCommandBuffer to WebGPU GPUCommandEncoder
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -11,7 +12,8 @@ use crate::device;
 use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
 
-pub static COMMAND_BUFFER_ALLOCATOR: HandleAllocator<VkCommandBufferData> = HandleAllocator::new();
+pub static COMMAND_BUFFER_ALLOCATOR: Lazy<HandleAllocator<VkCommandBufferData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkCommandBufferData {
     pub device: vk::Device,
@@ -61,7 +63,7 @@ pub unsafe fn allocate_command_buffers(
         };
 
         let cmd_handle = COMMAND_BUFFER_ALLOCATOR.allocate(cmd_data);
-        *cmd_buffer = vk::CommandBuffer::from_raw(cmd_handle);
+        *cmd_buffer = Handle::from_raw(cmd_handle);
 
         pool_data.allocated_buffers.write().push(*cmd_buffer);
     }

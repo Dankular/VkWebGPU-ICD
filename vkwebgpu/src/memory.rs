@@ -3,15 +3,17 @@
 //! WebGPU doesn't expose explicit memory allocation like Vulkan.
 //! We track allocations but map them to WebGPU resources lazily.
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
 use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
 
-pub static MEMORY_ALLOCATOR: HandleAllocator<VkDeviceMemoryData> = HandleAllocator::new();
+pub static MEMORY_ALLOCATOR: Lazy<HandleAllocator<VkDeviceMemoryData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkDeviceMemoryData {
     pub device: vk::Device,
@@ -46,12 +48,16 @@ pub unsafe fn allocate_memory(
     };
 
     let memory_handle = MEMORY_ALLOCATOR.allocate(memory_data);
-    *p_memory = vk::DeviceMemory::from_raw(memory_handle);
+    *p_memory = Handle::from_raw(memory_handle);
 
     Ok(())
 }
 
-pub unsafe fn free_memory(memory: vk::DeviceMemory, _p_allocator: *const vk::AllocationCallbacks) {
+pub unsafe fn free_memory(
+    _device: vk::Device,
+    memory: vk::DeviceMemory,
+    _p_allocator: *const vk::AllocationCallbacks,
+) {
     if memory == vk::DeviceMemory::null() {
         return;
     }
@@ -61,6 +67,7 @@ pub unsafe fn free_memory(memory: vk::DeviceMemory, _p_allocator: *const vk::All
 }
 
 pub unsafe fn map_memory(
+    _device: vk::Device,
     memory: vk::DeviceMemory,
     offset: vk::DeviceSize,
     size: vk::DeviceSize,
@@ -88,7 +95,7 @@ pub unsafe fn map_memory(
     Ok(())
 }
 
-pub unsafe fn unmap_memory(memory: vk::DeviceMemory) {
+pub unsafe fn unmap_memory(_device: vk::Device, memory: vk::DeviceMemory) {
     if let Some(memory_data) = MEMORY_ALLOCATOR.get(memory.as_raw()) {
         let mut mapped_ptr = memory_data.mapped_ptr.write();
         *mapped_ptr = None;

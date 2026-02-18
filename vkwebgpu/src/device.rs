@@ -2,8 +2,9 @@
 //!
 //! Maps VkDevice to WebGPU GPUDevice
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::info;
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -15,7 +16,8 @@ use crate::instance;
 use crate::shader::ShaderCache;
 
 /// Global device allocator
-pub static DEVICE_ALLOCATOR: HandleAllocator<VkDeviceData> = HandleAllocator::new();
+pub static DEVICE_ALLOCATOR: Lazy<HandleAllocator<VkDeviceData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 /// Device data
 pub struct VkDeviceData {
@@ -95,7 +97,7 @@ pub unsafe fn create_device(
     };
 
     let device_handle = DEVICE_ALLOCATOR.allocate(device_data);
-    *p_device = vk::Device::from_raw(device_handle);
+    *p_device = Handle::from_raw(device_handle);
 
     info!("Logical device created successfully");
     Ok(())

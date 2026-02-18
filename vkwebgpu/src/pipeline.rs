@@ -1,8 +1,9 @@
 //! Vulkan Pipeline implementation
 //! Maps VkPipeline to WebGPU GPURenderPipeline/GPUComputePipeline
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 
 use crate::device;
@@ -10,10 +11,12 @@ use crate::error::{Result, VkError};
 use crate::format;
 use crate::handle::HandleAllocator;
 
-pub static PIPELINE_LAYOUT_ALLOCATOR: HandleAllocator<VkPipelineLayoutData> =
-    HandleAllocator::new();
-pub static PIPELINE_ALLOCATOR: HandleAllocator<VkPipelineData> = HandleAllocator::new();
-pub static SHADER_MODULE_ALLOCATOR: HandleAllocator<VkShaderModuleData> = HandleAllocator::new();
+pub static PIPELINE_LAYOUT_ALLOCATOR: Lazy<HandleAllocator<VkPipelineLayoutData>> =
+    Lazy::new(|| HandleAllocator::new());
+pub static PIPELINE_ALLOCATOR: Lazy<HandleAllocator<VkPipelineData>> =
+    Lazy::new(|| HandleAllocator::new());
+pub static SHADER_MODULE_ALLOCATOR: Lazy<HandleAllocator<VkShaderModuleData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkPipelineLayoutData {
     pub device: vk::Device,
@@ -58,12 +61,13 @@ pub unsafe fn create_shader_module(
     let module_data = VkShaderModuleData { device, spirv };
 
     let module_handle = SHADER_MODULE_ALLOCATOR.allocate(module_data);
-    *p_shader_module = vk::ShaderModule::from_raw(module_handle);
+    *p_shader_module = Handle::from_raw(module_handle);
 
     Ok(())
 }
 
 pub unsafe fn destroy_shader_module(
+    _device: vk::Device,
     shader_module: vk::ShaderModule,
     _p_allocator: *const vk::AllocationCallbacks,
 ) {
@@ -113,13 +117,14 @@ pub unsafe fn create_pipeline_layout(
 
     #[cfg(not(target_arch = "wasm32"))]
     let wgpu_layout = {
-        let bind_group_layouts: Vec<&wgpu::BindGroupLayout> = set_layouts
+        // Keep Arc references alive for the lifetime of bind_group_layouts
+        let layout_datas: Vec<_> = set_layouts
             .iter()
-            .filter_map(|&layout| {
-                crate::descriptor::get_descriptor_set_layout_data(layout)
-                    .map(|data| &*data.wgpu_layout)
-            })
+            .filter_map(|&layout| crate::descriptor::get_descriptor_set_layout_data(layout))
             .collect();
+
+        let bind_group_layouts: Vec<&wgpu::BindGroupLayout> =
+            layout_datas.iter().map(|data| &*data.wgpu_layout).collect();
 
         device_data
             .backend
@@ -140,12 +145,13 @@ pub unsafe fn create_pipeline_layout(
     };
 
     let layout_handle = PIPELINE_LAYOUT_ALLOCATOR.allocate(layout_data);
-    *p_pipeline_layout = vk::PipelineLayout::from_raw(layout_handle);
+    *p_pipeline_layout = Handle::from_raw(layout_handle);
 
     Ok(())
 }
 
 pub unsafe fn destroy_pipeline_layout(
+    _device: vk::Device,
     pipeline_layout: vk::PipelineLayout,
     _p_allocator: *const vk::AllocationCallbacks,
 ) {
@@ -184,7 +190,7 @@ pub unsafe fn create_graphics_pipelines(
         };
 
         let pipeline_handle = PIPELINE_ALLOCATOR.allocate(pipeline_data);
-        pipelines[i] = vk::Pipeline::from_raw(pipeline_handle);
+        pipelines[i] = Handle::from_raw(pipeline_handle);
     }
 
     Ok(())
@@ -279,6 +285,7 @@ unsafe fn create_wgpu_render_pipeline(
                     module: vertex_module.as_ref().unwrap(),
                     entry_point: "main",
                     buffers: &vertex_buffers,
+                    compilation_options: Default::default(),
                 },
                 primitive,
                 depth_stencil: None,
@@ -287,6 +294,7 @@ unsafe fn create_wgpu_render_pipeline(
                     module,
                     entry_point: "main",
                     targets: &color_targets,
+                    compilation_options: Default::default(),
                 }),
                 multiview: None,
             });
@@ -326,6 +334,7 @@ fn vk_to_wgpu_primitive_topology(topology: vk::PrimitiveTopology) -> wgpu::Primi
 }
 
 pub unsafe fn destroy_pipeline(
+    _device: vk::Device,
     pipeline: vk::Pipeline,
     _p_allocator: *const vk::AllocationCallbacks,
 ) {

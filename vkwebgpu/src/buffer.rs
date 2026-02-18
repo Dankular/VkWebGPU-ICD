@@ -1,8 +1,9 @@
 //! Vulkan Buffer implementation
 //! Maps VkBuffer to WebGPU GPUBuffer
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -11,7 +12,8 @@ use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
 use crate::memory;
 
-pub static BUFFER_ALLOCATOR: HandleAllocator<VkBufferData> = HandleAllocator::new();
+pub static BUFFER_ALLOCATOR: Lazy<HandleAllocator<VkBufferData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkBufferData {
     pub device: vk::Device,
@@ -49,12 +51,16 @@ pub unsafe fn create_buffer(
     };
 
     let buffer_handle = BUFFER_ALLOCATOR.allocate(buffer_data);
-    *p_buffer = vk::Buffer::from_raw(buffer_handle);
+    *p_buffer = Handle::from_raw(buffer_handle);
 
     Ok(())
 }
 
-pub unsafe fn destroy_buffer(buffer: vk::Buffer, _p_allocator: *const vk::AllocationCallbacks) {
+pub unsafe fn destroy_buffer(
+    _device: vk::Device,
+    buffer: vk::Buffer,
+    _p_allocator: *const vk::AllocationCallbacks,
+) {
     if buffer == vk::Buffer::null() {
         return;
     }
@@ -64,6 +70,7 @@ pub unsafe fn destroy_buffer(buffer: vk::Buffer, _p_allocator: *const vk::Alloca
 }
 
 pub unsafe fn bind_buffer_memory(
+    _device: vk::Device,
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
     memory_offset: vk::DeviceSize,
@@ -115,6 +122,7 @@ pub unsafe fn bind_buffer_memory(
 }
 
 pub unsafe fn get_buffer_memory_requirements(
+    _device: vk::Device,
     buffer: vk::Buffer,
     p_memory_requirements: *mut vk::MemoryRequirements,
 ) {

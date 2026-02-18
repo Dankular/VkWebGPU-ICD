@@ -1,13 +1,15 @@
 //! Vulkan Framebuffer implementation
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 
 use crate::error::Result;
 use crate::handle::HandleAllocator;
 
-pub static FRAMEBUFFER_ALLOCATOR: HandleAllocator<VkFramebufferData> = HandleAllocator::new();
+pub static FRAMEBUFFER_ALLOCATOR: Lazy<HandleAllocator<VkFramebufferData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkFramebufferData {
     pub device: vk::Device,
@@ -53,12 +55,13 @@ pub unsafe fn create_framebuffer(
     };
 
     let framebuffer_handle = FRAMEBUFFER_ALLOCATOR.allocate(framebuffer_data);
-    *p_framebuffer = vk::Framebuffer::from_raw(framebuffer_handle);
+    *p_framebuffer = Handle::from_raw(framebuffer_handle);
 
     Ok(())
 }
 
 pub unsafe fn destroy_framebuffer(
+    _device: vk::Device,
     framebuffer: vk::Framebuffer,
     _p_allocator: *const vk::AllocationCallbacks,
 ) {

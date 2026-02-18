@@ -14,7 +14,7 @@ pub struct HandleAllocator<T> {
 }
 
 impl<T> HandleAllocator<T> {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             next_handle: RwLock::new(1), // Start at 1, 0 is VK_NULL_HANDLE
             objects: RwLock::new(FxHashMap::default()),

@@ -1,8 +1,9 @@
 //! Vulkan Image implementation
 //! Maps VkImage to WebGPU GPUTexture
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -11,8 +12,10 @@ use crate::error::{Result, VkError};
 use crate::format;
 use crate::handle::HandleAllocator;
 
-pub static IMAGE_ALLOCATOR: HandleAllocator<VkImageData> = HandleAllocator::new();
-pub static IMAGE_VIEW_ALLOCATOR: HandleAllocator<VkImageViewData> = HandleAllocator::new();
+pub static IMAGE_ALLOCATOR: Lazy<HandleAllocator<VkImageData>> =
+    Lazy::new(|| HandleAllocator::new());
+pub static IMAGE_VIEW_ALLOCATOR: Lazy<HandleAllocator<VkImageViewData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkImageData {
     pub device: vk::Device,
@@ -79,12 +82,16 @@ pub unsafe fn create_image(
     };
 
     let image_handle = IMAGE_ALLOCATOR.allocate(image_data);
-    *p_image = vk::Image::from_raw(image_handle);
+    *p_image = Handle::from_raw(image_handle);
 
     Ok(())
 }
 
-pub unsafe fn destroy_image(image: vk::Image, _p_allocator: *const vk::AllocationCallbacks) {
+pub unsafe fn destroy_image(
+    _device: vk::Device,
+    image: vk::Image,
+    _p_allocator: *const vk::AllocationCallbacks,
+) {
     if image == vk::Image::null() {
         return;
     }
@@ -94,6 +101,7 @@ pub unsafe fn destroy_image(image: vk::Image, _p_allocator: *const vk::Allocatio
 }
 
 pub unsafe fn bind_image_memory(
+    _device: vk::Device,
     image: vk::Image,
     memory: vk::DeviceMemory,
     memory_offset: vk::DeviceSize,
@@ -159,6 +167,7 @@ pub unsafe fn bind_image_memory(
 }
 
 pub unsafe fn get_image_memory_requirements(
+    _device: vk::Device,
     image: vk::Image,
     p_memory_requirements: *mut vk::MemoryRequirements,
 ) {
@@ -268,12 +277,13 @@ pub unsafe fn create_image_view(
     }
 
     let view_handle = IMAGE_VIEW_ALLOCATOR.allocate(view_data);
-    *p_view = vk::ImageView::from_raw(view_handle);
+    *p_view = Handle::from_raw(view_handle);
 
     Ok(())
 }
 
 pub unsafe fn destroy_image_view(
+    _device: vk::Device,
     image_view: vk::ImageView,
     _p_allocator: *const vk::AllocationCallbacks,
 ) {

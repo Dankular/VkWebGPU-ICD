@@ -1,15 +1,17 @@
 //! Vulkan Sampler implementation
 //! Maps VkSampler to WebGPU GPUSampler
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 
 use crate::device;
 use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
 
-pub static SAMPLER_ALLOCATOR: HandleAllocator<VkSamplerData> = HandleAllocator::new();
+pub static SAMPLER_ALLOCATOR: Lazy<HandleAllocator<VkSamplerData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkSamplerData {
     pub device: vk::Device,
@@ -115,12 +117,12 @@ pub unsafe fn create_sampler(
     };
 
     let sampler_handle = SAMPLER_ALLOCATOR.allocate(sampler_data);
-    *p_sampler = vk::Sampler::from_raw(sampler_handle);
+    *p_sampler = Handle::from_raw(sampler_handle);
 
     Ok(())
 }
 
-pub unsafe fn destroy_sampler(sampler: vk::Sampler, _p_allocator: *const vk::AllocationCallbacks) {
+pub unsafe fn destroy_sampler(_device: vk::Device, sampler: vk::Sampler, _p_allocator: *const vk::AllocationCallbacks) {
     if sampler == vk::Sampler::null() {
         return;
     }

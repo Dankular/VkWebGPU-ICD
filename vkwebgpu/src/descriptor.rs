@@ -1,8 +1,9 @@
 //! Vulkan Descriptor Set implementation
 //! Maps VkDescriptorSet to WebGPU GPUBindGroup
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -13,15 +14,16 @@ use crate::handle::HandleAllocator;
 use crate::image;
 use crate::sampler;
 
-pub static DESCRIPTOR_SET_LAYOUT_ALLOCATOR: HandleAllocator<VkDescriptorSetLayoutData> =
-    HandleAllocator::new();
-pub static DESCRIPTOR_POOL_ALLOCATOR: HandleAllocator<VkDescriptorPoolData> =
-    HandleAllocator::new();
-pub static DESCRIPTOR_SET_ALLOCATOR: HandleAllocator<VkDescriptorSetData> = HandleAllocator::new();
+pub static DESCRIPTOR_SET_LAYOUT_ALLOCATOR: Lazy<HandleAllocator<VkDescriptorSetLayoutData>> =
+    Lazy::new(|| HandleAllocator::new());
+pub static DESCRIPTOR_POOL_ALLOCATOR: Lazy<HandleAllocator<VkDescriptorPoolData>> =
+    Lazy::new(|| HandleAllocator::new());
+pub static DESCRIPTOR_SET_ALLOCATOR: Lazy<HandleAllocator<VkDescriptorSetData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkDescriptorSetLayoutData {
     pub device: vk::Device,
-    pub bindings: Vec<vk::DescriptorSetLayoutBinding>,
+    pub bindings: Vec<vk::DescriptorSetLayoutBinding<'static>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub wgpu_layout: Arc<wgpu::BindGroupLayout>,
 }
@@ -71,9 +73,22 @@ pub unsafe fn create_descriptor_set_layout(
 ) -> Result<()> {
     let create_info = &*p_create_info;
 
-    let bindings = if create_info.binding_count > 0 {
+    let bindings: Vec<vk::DescriptorSetLayoutBinding<'static>> = if create_info.binding_count > 0 {
         std::slice::from_raw_parts(create_info.p_bindings, create_info.binding_count as usize)
-            .to_vec()
+            .iter()
+            .map(|b| {
+                // Create a new binding with 'static lifetime
+                // This is safe because we're not using p_immutable_samplers
+                vk::DescriptorSetLayoutBinding {
+                    binding: b.binding,
+                    descriptor_type: b.descriptor_type,
+                    descriptor_count: b.descriptor_count,
+                    stage_flags: b.stage_flags,
+                    p_immutable_samplers: std::ptr::null(), // We don't support immutable samplers yet
+                    _marker: std::marker::PhantomData,
+                }
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -110,12 +125,13 @@ pub unsafe fn create_descriptor_set_layout(
     };
 
     let layout_handle = DESCRIPTOR_SET_LAYOUT_ALLOCATOR.allocate(layout_data);
-    *p_set_layout = vk::DescriptorSetLayout::from_raw(layout_handle);
+    *p_set_layout = Handle::from_raw(layout_handle);
 
     Ok(())
 }
 
 pub unsafe fn destroy_descriptor_set_layout(
+    _device: vk::Device,
     descriptor_set_layout: vk::DescriptorSetLayout,
     _p_allocator: *const vk::AllocationCallbacks,
 ) {
@@ -159,12 +175,13 @@ pub unsafe fn create_descriptor_pool(
     };
 
     let pool_handle = DESCRIPTOR_POOL_ALLOCATOR.allocate(pool_data);
-    *p_descriptor_pool = vk::DescriptorPool::from_raw(pool_handle);
+    *p_descriptor_pool = Handle::from_raw(pool_handle);
 
     Ok(())
 }
 
 pub unsafe fn destroy_descriptor_pool(
+    _device: vk::Device,
     descriptor_pool: vk::DescriptorPool,
     _p_allocator: *const vk::AllocationCallbacks,
 ) {
@@ -218,7 +235,7 @@ pub unsafe fn allocate_descriptor_sets(
         };
 
         let set_handle = DESCRIPTOR_SET_ALLOCATOR.allocate(set_data);
-        let descriptor_set = vk::DescriptorSet::from_raw(set_handle);
+        let descriptor_set = Handle::from_raw(set_handle);
         dest_sets[i] = descriptor_set;
 
         pool_data.allocated_sets.write().push(descriptor_set);

@@ -1,14 +1,16 @@
 //! Vulkan Command Pool implementation
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
 use crate::error::Result;
 use crate::handle::HandleAllocator;
 
-pub static COMMAND_POOL_ALLOCATOR: HandleAllocator<VkCommandPoolData> = HandleAllocator::new();
+pub static COMMAND_POOL_ALLOCATOR: Lazy<HandleAllocator<VkCommandPoolData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkCommandPoolData {
     pub device: vk::Device,
@@ -38,12 +40,13 @@ pub unsafe fn create_command_pool(
     };
 
     let pool_handle = COMMAND_POOL_ALLOCATOR.allocate(pool_data);
-    *p_command_pool = vk::CommandPool::from_raw(pool_handle);
+    *p_command_pool = Handle::from_raw(pool_handle);
 
     Ok(())
 }
 
 pub unsafe fn destroy_command_pool(
+    _device: vk::Device,
     command_pool: vk::CommandPool,
     _p_allocator: *const vk::AllocationCallbacks,
 ) {

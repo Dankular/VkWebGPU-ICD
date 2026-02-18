@@ -2,8 +2,9 @@
 //!
 //! Maps VkInstance to WebGPU adapter enumeration
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::{debug, info};
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -13,11 +14,12 @@ use crate::error::{Result, VkError};
 use crate::handle::HandleAllocator;
 
 /// Global instance allocator
-pub static INSTANCE_ALLOCATOR: HandleAllocator<VkInstanceData> = HandleAllocator::new();
+pub static INSTANCE_ALLOCATOR: Lazy<HandleAllocator<VkInstanceData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 /// Global physical device allocator
-pub static PHYSICAL_DEVICE_ALLOCATOR: HandleAllocator<VkPhysicalDeviceData> =
-    HandleAllocator::new();
+pub static PHYSICAL_DEVICE_ALLOCATOR: Lazy<HandleAllocator<VkPhysicalDeviceData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 /// Instance data
 pub struct VkInstanceData {
@@ -130,10 +132,10 @@ pub unsafe fn create_instance(
     };
 
     let instance_handle = INSTANCE_ALLOCATOR.allocate(instance_data);
-    *p_instance = vk::Instance::from_raw(instance_handle);
+    *p_instance = Handle::from_raw(instance_handle);
 
     // Enumerate physical devices immediately
-    enumerate_physical_devices_internal(vk::Instance::from_raw(instance_handle))?;
+    enumerate_physical_devices_internal(Handle::from_raw(instance_handle))?;
 
     Ok(())
 }
@@ -202,7 +204,7 @@ fn enumerate_physical_devices_internal(instance: vk::Instance) -> Result<()> {
     };
 
     let physical_device_handle = PHYSICAL_DEVICE_ALLOCATOR.allocate(physical_device_data);
-    let physical_device = vk::PhysicalDevice::from_raw(physical_device_handle);
+    let physical_device = Handle::from_raw(physical_device_handle);
 
     let mut devices = instance_data.physical_devices.write();
     devices.push(physical_device);

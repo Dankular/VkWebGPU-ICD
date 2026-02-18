@@ -52,15 +52,16 @@ impl ShaderCache {
 
     fn translate_spirv_to_wgsl(spirv: &[u32]) -> Result<String> {
         // Parse SPIR-V using Naga
-        let module = naga::front::spv::parse_u32_slice(
-            spirv,
-            &naga::front::spv::Options {
-                adjust_coordinate_space: true,
-                strict_capabilities: false,
-                block_ctx_dump_prefix: None,
-            },
-        )
-        .map_err(|e| VkError::ShaderTranslationFailed(format!("SPIR-V parse error: {:?}", e)))?;
+        let options = naga::front::spv::Options {
+            adjust_coordinate_space: true,
+            strict_capabilities: false,
+            block_ctx_dump_prefix: None,
+        };
+        let module = naga::front::spv::Frontend::new(spirv.iter().cloned(), &options)
+            .parse()
+            .map_err(|e| {
+                VkError::ShaderTranslationFailed(format!("SPIR-V parse error: {:?}", e))
+            })?;
 
         // Validate the module
         let info = naga::valid::Validator::new(

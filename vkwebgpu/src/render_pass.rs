@@ -1,18 +1,20 @@
 //! Vulkan Render Pass implementation
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::debug;
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 
 use crate::error::Result;
 use crate::handle::HandleAllocator;
 
-pub static RENDER_PASS_ALLOCATOR: HandleAllocator<VkRenderPassData> = HandleAllocator::new();
+pub static RENDER_PASS_ALLOCATOR: Lazy<HandleAllocator<VkRenderPassData>> =
+    Lazy::new(|| HandleAllocator::new());
 
 pub struct VkRenderPassData {
     pub device: vk::Device,
     pub attachments: Vec<vk::AttachmentDescription>,
-    pub subpasses: Vec<vk::SubpassDescription>,
+    pub subpasses: Vec<vk::SubpassDescription<'static>>,
     pub dependencies: Vec<vk::SubpassDependency>,
 }
 
@@ -47,12 +49,13 @@ pub unsafe fn create_render_pass(
     };
 
     let render_pass_handle = RENDER_PASS_ALLOCATOR.allocate(render_pass_data);
-    *p_render_pass = vk::RenderPass::from_raw(render_pass_handle);
+    *p_render_pass = Handle::from_raw(render_pass_handle);
 
     Ok(())
 }
 
 pub unsafe fn destroy_render_pass(
+    _device: vk::Device,
     render_pass: vk::RenderPass,
     _p_allocator: *const vk::AllocationCallbacks,
 ) {
