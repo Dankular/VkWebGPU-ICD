@@ -75,6 +75,18 @@ pub unsafe fn allocate_memory(
     let memory_handle = MEMORY_ALLOCATOR.allocate(memory_data);
     *p_memory = Handle::from_raw(memory_handle);
 
+    #[cfg(feature = "webx")]
+    {
+        // payload: handle(u64) + size(u64) + memTypeIndex(u32)
+        let mut payload = Vec::with_capacity(20);
+        payload.extend_from_slice(&memory_handle.to_le_bytes());
+        payload.extend_from_slice(&allocate_info.allocation_size.to_le_bytes());
+        payload.extend_from_slice(&allocate_info.memory_type_index.to_le_bytes());
+        if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0030, &payload) {
+            log::warn!("[webx] allocate_memory IPC failed: {:?}", e);
+        }
+    }
+
     Ok(())
 }
 
@@ -170,7 +182,7 @@ pub unsafe fn flush_mapped_memory_ranges(
 
 /// Write CPU-side `data` back to all wgpu Buffers bound to `memory_data`.
 /// Call this after the application has finished writing through a mapped pointer.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn flush_bound_buffers(device: vk::Device, memory_data: &VkDeviceMemoryData) {
     let device_data = match device::get_device_data(device) {
         Some(d) => d,
@@ -207,8 +219,8 @@ fn flush_bound_buffers(device: vk::Device, memory_data: &VkDeviceMemoryData) {
     }
 }
 
-/// No-op fallback for wasm32 where wgpu buffer writes work differently.
-#[cfg(target_arch = "wasm32")]
+/// No-op fallback for wasm32 and webx where wgpu buffer writes work differently.
+#[cfg(any(target_arch = "wasm32", feature = "webx"))]
 fn flush_bound_buffers(_device: vk::Device, _memory_data: &VkDeviceMemoryData) {}
 
 pub unsafe fn invalidate_mapped_memory_ranges(

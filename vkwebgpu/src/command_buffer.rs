@@ -12,6 +12,7 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+#[cfg(not(feature = "webx"))]
 use crate::backend::{CommandBuffer, WebGPUBackend};
 use crate::command_pool;
 use crate::error::{Result, VkError};
@@ -1880,7 +1881,7 @@ fn rp_store(op: vk::AttachmentStoreOp) -> wgpu::StoreOp {
 /// extension to keep render/compute passes alive for the duration of their commands,
 /// which is safe because we control the scope and ensure passes are dropped before
 /// encoder.finish().
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 pub fn replay_commands(
     cmd_data: &VkCommandBufferData,
     backend: &WebGPUBackend,
@@ -4352,7 +4353,7 @@ pub fn replay_commands(
     Ok(encoder.finish())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "webx")))]
 pub fn replay_commands(
     _cmd_data: &VkCommandBufferData,
     _backend: &WebGPUBackend,

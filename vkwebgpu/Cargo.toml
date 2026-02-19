@@ -34,3 +34,6 @@ pollster = "0.3"
 default = []
 debug-markers = []
 validation = []
+# WebX: replaces wgpu GPU calls with IPC to the browser host.
+# Build with: cargo build --features webx --target x86_64-unknown-linux-gnu
+webx = []

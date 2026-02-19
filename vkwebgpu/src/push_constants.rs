@@ -14,7 +14,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 use wgpu;
 
 /// Ring buffer for push constant emulation
@@ -22,9 +22,9 @@ use wgpu;
 /// The ring buffer allows efficient per-draw push constant updates without
 /// creating new buffers. It automatically wraps around when full.
 pub struct PushConstantRingBuffer {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     buffer: Arc<wgpu::Buffer>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     bind_group_layout: Arc<wgpu::BindGroupLayout>,
     offset: AtomicU32,
     capacity: u32,
@@ -38,7 +38,7 @@ impl PushConstantRingBuffer {
     /// Minimum uniform buffer offset alignment (WebGPU spec requires 256 bytes)
     pub const MIN_UNIFORM_BUFFER_ALIGNMENT: u32 = 256;
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub fn new(device: &wgpu::Device, capacity: u32) -> Self {
         let alignment = Self::MIN_UNIFORM_BUFFER_ALIGNMENT;
 
@@ -91,11 +91,23 @@ impl PushConstantRingBuffer {
         }
     }
 
+    /// No-op stub constructor for the WebX IPC backend (no wgpu device available).
+    #[cfg(feature = "webx")]
+    pub fn new_stub(capacity: u32) -> Self {
+        let alignment = Self::MIN_UNIFORM_BUFFER_ALIGNMENT;
+        let aligned_capacity = ((capacity + alignment - 1) / alignment) * alignment;
+        Self {
+            offset: AtomicU32::new(0),
+            capacity: aligned_capacity,
+            alignment,
+        }
+    }
+
     /// Push data to the ring buffer and return the offset
     ///
     /// Returns the aligned offset where the data was written.
     /// This offset should be used when binding the buffer as a uniform buffer.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub fn push(&self, queue: &wgpu::Queue, data: &[u8]) -> u32 {
         if data.is_empty() {
             return 0;
@@ -151,19 +163,19 @@ impl PushConstantRingBuffer {
     }
 
     /// Get the underlying WebGPU buffer
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub fn buffer(&self) -> &wgpu::Buffer {
         &self.buffer
     }
 
     /// Get the bind group layout for push constants
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
         &self.bind_group_layout
     }
 
     /// Create a bind group for a specific offset in the ring buffer
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub fn create_bind_group(&self, device: &wgpu::Device) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("PushConstantBindGroup"),

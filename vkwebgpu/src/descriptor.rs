@@ -26,7 +26,7 @@ pub struct VkDescriptorSetLayoutData {
     /// Maps each CIS texture binding → compact synthetic sampler binding.
     /// Formula: max_uc_binding + 1 + rank (matches shader.rs::compact_sampler_binding).
     pub cis_sampler_binding: HashMap<u32, u32>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub wgpu_layout: Arc<wgpu::BindGroupLayout>,
 }
 
@@ -42,7 +42,7 @@ pub struct VkDescriptorSetData {
     pub layout: vk::DescriptorSetLayout,
     pub pool: vk::DescriptorPool,
     pub bindings: RwLock<Vec<DescriptorBinding>>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub wgpu_bind_group: RwLock<Option<Arc<wgpu::BindGroup>>>,
 }
 
@@ -105,7 +105,7 @@ pub unsafe fn create_descriptor_set_layout(
     let device_data = device::get_device_data(device)
         .ok_or_else(|| VkError::InvalidHandle("Invalid device".to_string()))?;
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     let wgpu_layout = {
         // For COMBINED_IMAGE_SAMPLER, emit both a Texture entry and a Sampler entry.
         // The sampler goes at a compact synthetic slot (max_uc_binding + 1 + rank) so
@@ -136,16 +136,40 @@ pub unsafe fn create_descriptor_set_layout(
             })
     };
 
+    #[cfg(feature = "webx")]
+    let ipc_bindings: Vec<(u32, u32, u32, u32, u32)> = bindings.iter().map(|b| {
+        let cis_b = cis_sampler_binding.get(&b.binding).copied().unwrap_or(0xFFFF_FFFF);
+        (b.binding, b.descriptor_type.as_raw() as u32, b.descriptor_count, b.stage_flags.as_raw(), cis_b)
+    }).collect();
+
     let layout_data = VkDescriptorSetLayoutData {
         device,
         bindings,
         cis_sampler_binding,
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         wgpu_layout: Arc::new(wgpu_layout),
     };
 
     let layout_handle = DESCRIPTOR_SET_LAYOUT_ALLOCATOR.allocate(layout_data);
     *p_set_layout = Handle::from_raw(layout_handle);
+
+    #[cfg(feature = "webx")]
+    {
+        // payload: handle(u64) + bindingCount(u32) + bindings[](binding:u32 + type:u32 + count:u32 + stages:u32 + cisCompanion:u32)
+        let mut payload = Vec::with_capacity(12 + ipc_bindings.len() * 20);
+        payload.extend_from_slice(&layout_handle.to_le_bytes());
+        payload.extend_from_slice(&(ipc_bindings.len() as u32).to_le_bytes());
+        for (binding, dtype, count, stages, cis_b) in &ipc_bindings {
+            payload.extend_from_slice(&binding.to_le_bytes());
+            payload.extend_from_slice(&dtype.to_le_bytes());
+            payload.extend_from_slice(&count.to_le_bytes());
+            payload.extend_from_slice(&stages.to_le_bytes());
+            payload.extend_from_slice(&cis_b.to_le_bytes());
+        }
+        if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0060, &payload) {
+            log::warn!("[webx] create_descriptor_set_layout IPC failed: {:?}", e);
+        }
+    }
 
     Ok(())
 }
@@ -339,7 +363,7 @@ pub unsafe fn allocate_descriptor_sets(
             layout,
             pool: allocate_info.descriptor_pool,
             bindings: RwLock::new(Vec::new()),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
             wgpu_bind_group: RwLock::new(None),
         };
 
@@ -348,6 +372,21 @@ pub unsafe fn allocate_descriptor_sets(
         dest_sets[i] = descriptor_set;
 
         pool_data.allocated_sets.write().push(descriptor_set);
+    }
+
+    #[cfg(feature = "webx")]
+    {
+        // payload: count(u32) + sets[](setHandle:u64 + layoutHandle:u64) = 4 + n*16
+        let count = dest_sets.len();
+        let mut payload = Vec::with_capacity(4 + count * 16);
+        payload.extend_from_slice(&(count as u32).to_le_bytes());
+        for (&set, &layout) in dest_sets.iter().zip(layouts.iter()) {
+            payload.extend_from_slice(&set.as_raw().to_le_bytes());
+            payload.extend_from_slice(&layout.as_raw().to_le_bytes());
+        }
+        if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0064, &payload) {
+            log::warn!("[webx] allocate_descriptor_sets IPC failed: {:?}", e);
+        }
     }
 
     Ok(())
@@ -458,7 +497,7 @@ pub unsafe fn update_descriptor_sets(
 
                 // Rebuild the wgpu BindGroup now that bindings are updated.
                 // Returns None silently if any resource is not yet ready.
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
                 {
                     match rebuild_bind_group(set_data.device, &set_data) {
                         Some(bg) => {
@@ -473,6 +512,49 @@ pub unsafe fn update_descriptor_sets(
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(feature = "webx")]
+    if descriptor_write_count > 0 {
+        let writes_ipc = std::slice::from_raw_parts(p_descriptor_writes, descriptor_write_count as usize);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(descriptor_write_count as u32).to_le_bytes());
+        for write in writes_ipc {
+            payload.extend_from_slice(&write.dst_set.as_raw().to_le_bytes());
+            payload.extend_from_slice(&write.dst_binding.to_le_bytes());
+            payload.extend_from_slice(&write.dst_array_element.to_le_bytes());
+            payload.extend_from_slice(&write.descriptor_count.to_le_bytes());
+            payload.extend_from_slice(&(write.descriptor_type.as_raw() as u32).to_le_bytes());
+            match write.descriptor_type {
+                vk::DescriptorType::UNIFORM_BUFFER
+                | vk::DescriptorType::STORAGE_BUFFER
+                | vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+                | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC => {
+                    if !write.p_buffer_info.is_null() {
+                        let infos = std::slice::from_raw_parts(write.p_buffer_info, write.descriptor_count as usize);
+                        for info in infos {
+                            payload.extend_from_slice(&info.buffer.as_raw().to_le_bytes());
+                            payload.extend_from_slice(&info.offset.to_le_bytes());
+                            payload.extend_from_slice(&info.range.to_le_bytes());
+                        }
+                    }
+                }
+                _ => {
+                    if !write.p_image_info.is_null() {
+                        let infos = std::slice::from_raw_parts(write.p_image_info, write.descriptor_count as usize);
+                        for info in infos {
+                            payload.extend_from_slice(&info.image_view.as_raw().to_le_bytes());
+                            payload.extend_from_slice(&info.sampler.as_raw().to_le_bytes());
+                            payload.extend_from_slice(&(info.image_layout.as_raw() as u32).to_le_bytes());
+                            payload.extend_from_slice(&0u32.to_le_bytes()); // padding
+                        }
+                    }
+                }
+            }
+        }
+        if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0065, &payload) {
+            log::warn!("[webx] update_descriptor_sets IPC failed: {:?}", e);
         }
     }
 
@@ -512,7 +594,7 @@ pub unsafe fn update_descriptor_sets(
                 } // both locks released
 
                 // Rebuild the destination set's BindGroup.
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
                 {
                     if let Some(bg) = rebuild_bind_group(dst.device, &dst) {
                         *dst.wgpu_bind_group.write() = Some(bg);
@@ -528,7 +610,7 @@ pub unsafe fn update_descriptor_sets(
 ///
 /// Returns `None` silently if any required resource is not yet available (partial update,
 /// null handle, or wgpu object not yet created). The caller should retry after all writes.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn rebuild_bind_group(
     device: vk::Device,
     set_data: &VkDescriptorSetData,
@@ -669,7 +751,7 @@ fn rebuild_bind_group(
     Some(Arc::new(bind_group))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_bind_group_layout_entry(
     binding: &vk::DescriptorSetLayoutBinding,
 ) -> wgpu::BindGroupLayoutEntry {
@@ -684,7 +766,7 @@ fn vk_to_wgpu_bind_group_layout_entry(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_shader_stages(stages: vk::ShaderStageFlags) -> wgpu::ShaderStages {
     let mut result = wgpu::ShaderStages::empty();
 
@@ -701,7 +783,7 @@ fn vk_to_wgpu_shader_stages(stages: vk::ShaderStageFlags) -> wgpu::ShaderStages 
     result
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_binding_type(desc_type: vk::DescriptorType, _count: u32) -> wgpu::BindingType {
     match desc_type {
         vk::DescriptorType::UNIFORM_BUFFER | vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC => {

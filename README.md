@@ -2,63 +2,75 @@
 
 A Vulkan Installable Client Driver (ICD) that translates Vulkan API calls to WebGPU, enabling Vulkan applications (including DXVK-translated DirectX games) to run in web browsers.
 
-## Primary Use Case: DirectX Games in the Browser via CheerpX + Proton
+## Primary Use Case: DirectX Games in the Browser (WebX Project)
 
-Run unmodified Windows DirectX games inside a browser tab — no plugin, no native install — by stacking three compatibility layers:
+This ICD is the GPU execution backend for **[WebX](https://github.com/Dankular/WebX)** — a companion project that orchestrates the full stack required to run unmodified Windows Steam games in a browser tab.
+
+### Full system architecture
 
 ```
-Windows Game
-    │  DirectX 9 / 10 / 11 calls
-    ▼
-DXVK  (part of Proton)
-    │  Translates D3D → Vulkan
-    ▼
-VkWebGPU ICD  ◄── this project
-    │  Translates Vulkan → WebGPU
-    ▼
-WebGPU  (browser GPU API)
-    │
-    ▼
-Browser / GPU
+┌─────────────────────────── Browser tab ──────────────────────────────┐
+│                                                                        │
+│  ┌──────────────── CheerpX (x86-64 Linux VM in WASM) ─────────────┐  │
+│  │                                                                  │  │
+│  │  Steam Game (Win32 .exe)                                         │  │
+│  │    │ DirectX 9 / 10 / 11 calls                                  │  │
+│  │    ▼                                                             │  │
+│  │  DXVK  (part of Proton)                                         │  │
+│  │    │ Translates D3D → Vulkan API                                 │  │
+│  │    ▼                                                             │  │
+│  │  libvkwebx.so  ◄── WebX guest ICD (x86-64 Linux .so)           │  │
+│  │    │ Serializes Vulkan calls to binary packets                   │  │
+│  │    │ outb(byte, 0x7860) — I/O port doorbell                     │  │
+│  └────┼─────────────────────────────────────────────────────────────┘  │
+│       │  CheerpX MessagePort  (registerPortListener bridge)            │
+│       ▼                                                                │
+│  vk-bridge.mjs  (WebX harness)                                        │
+│    │ Deserializes binary Vulkan command packets                        │
+│    ▼                                                                   │
+│  VkWebGPU-ICD plugin  ◄── THIS PROJECT (host-side, browser JS/WASM)  │
+│    │ Executes Vulkan commands as WebGPU                                │
+│    ▼                                                                   │
+│  Browser WebGPU API  →  GPU                                           │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-### How the layers fit together
+### Layer responsibilities
 
-| Layer | What it does | Where it runs |
-|-------|-------------|---------------|
-| **CheerpX** | x86-64 Linux VM in WebAssembly; runs unmodified Linux ELF binaries in the browser | Browser (WASM) |
-| **SteamOS / Proton** | Windows→Linux compatibility runtime (Wine + DXVK + Steam Play) running inside CheerpX | CheerpX VM |
-| **DXVK** | Translates Direct3D 9/10/11 API calls to Vulkan; ships inside Proton | CheerpX VM |
-| **VkWebGPU ICD** | Translates Vulkan API calls to WebGPU; registered as the sole Vulkan driver | CheerpX VM → Browser |
-| **WebGPU** | Modern browser GPU API backed by D3D12 / Metal / Vulkan natively | Browser |
+| Layer | Project | Where it runs | What it does |
+|-------|---------|--------------|--------------|
+| **CheerpX** | [leaningtech/cheerpx](https://cheerpx.io) | Browser (WASM) | x86-64 Linux VM; boots real SteamOS image |
+| **SteamOS image** | Valve Steam Deck | CheerpX VM | Full Proton runtime: Wine + DXVK + VKD3D-Proton |
+| **DXVK** | Valve (ships in Proton) | CheerpX VM | Translates D3D9/10/11 → Vulkan |
+| **libvkwebx.so** | [WebX/guest-icd](https://github.com/Dankular/WebX) | CheerpX VM (x86-64) | Thin Vulkan ICD; serializes calls to binary wire packets |
+| **vk-bridge.mjs** | [WebX/harness](https://github.com/Dankular/WebX) | Browser JS | Deserializes packets; dispatches to active plugin |
+| **VkWebGPU-ICD** | **This project** | Browser (host) | Executes Vulkan commands via WebGPU |
+| **WebGPU** | Browser | Browser | Hardware-accelerated GPU API (D3D12 / Metal / Vulkan) |
 
-### Deployment inside CheerpX
+### IPC bridge (WebX)
 
-Configure VkWebGPU ICD as the Vulkan driver inside the CheerpX Linux environment:
+The guest ICD communicates with the host via CheerpX's I/O port listener:
 
-```bash
-# Inside the CheerpX SteamOS image
-export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/vkwebgpu_icd.json
-export DXVK_HUD=0          # optional overlay
-export PROTON_USE_WINED3D=0 # force DXVK (Vulkan path)
-
-# Launch game via Proton as normal
-proton run game.exe
+```
+guest outb(byte, 0x7860)
+  → CheerpX MessagePort fires
+    → vk-bridge.mjs accumulates bytes into packets (magic 0x58574756 "VGWX" + length)
+      → plugin.dispatch() called on VkWebGPU-ICD
+        → WebGPU commands issued
+          → response written back via hostPort.postMessage()
+            → guest inb(0x7860) returns result
 ```
 
-The call chain at runtime:
-1. `game.exe` makes D3D11 calls through Wine's D3D shim
-2. DXVK intercepts and issues Vulkan commands
-3. VkWebGPU ICD receives Vulkan commands, translates to WebGPU
-4. WebGPU submits GPU work to the browser's native GPU API
-5. Frames appear in the CheerpX canvas element
+Synchronous Vulkan calls (e.g. `vkCreateDevice`, `vkAllocateMemory`) block the guest on `inb` until the host responds — CheerpX's emulation model allows this without blocking the browser event loop.
 
-### Why this works
+### Plugging in VkWebGPU-ICD
 
-- CheerpX executes the x86-64 Proton/Wine/DXVK binaries directly — no recompilation needed
-- VkWebGPU ICD is a standard Vulkan ICD (`.so` on Linux) that any `VK_DRIVER_FILES`-aware Vulkan loader will pick up, including the one inside the CheerpX VM
-- WebGPU is available in all major browsers (Chrome, Firefox, Safari), so no additional browser permissions or extensions are required
-- DXVK's Vulkan usage patterns (push constants, descriptor indexing, dynamic rendering) are the primary target for VkWebGPU's compatibility work
+WebX ships a stub plugin (`harness/vkwebgpu-plugin.mjs`) for independent development. When this ICD is ready, replace the stub import in `harness/vkwebgpu-plugin.mjs`:
+
+```js
+// harness/vkwebgpu-plugin.mjs  (WebX repo)
+import { VkWebGPUPlugin } from './path/to/VkWebGPU-ICD/harness/plugin.mjs';
+```
 
 ## Architecture
 
@@ -219,23 +231,22 @@ DXVK exercises a specific Vulkan subset. Priority work items:
 | Secondary command buffers | 🔄 | Stub; DXVK may require |
 | Pipeline cache | 🔄 | No-op; no correctness impact |
 
-### Phase 3: CheerpX Integration
+### Phase 3: WebX Integration
 
-1. Cross-compile ICD to x86-64 Linux shared library (`libvkwebgpu.so`)
-2. Mount into CheerpX filesystem image alongside Proton
-3. Set `VK_DRIVER_FILES` in the CheerpX environment config
-4. Verify Proton/DXVK enumerates the ICD and selects it
-5. Test with progressively complex games:
-   - 2D sprite-based titles (simplest DXVK usage)
-   - 3D games with basic shaders
-   - Enter the Gungeon (initial milestone)
+WebX ([github.com/Dankular/WebX](https://github.com/Dankular/WebX)) is the companion project that wires this ICD into a full browser-based Steam game stack. Integration steps:
+
+1. Expose a `plugin.mjs` JS/WASM entry point that implements the `VkPlugin` interface WebX's `vk-bridge.mjs` calls
+2. WebX's `harness/vkwebgpu-plugin.mjs` stub swapped for the real module
+3. Build WebX's guest ICD (`libvkwebx.so`) for x86-64 Linux (requires WSL or Docker with cross-compile toolchain)
+4. Install `libvkwebx.so` into the SteamOS ext2 image alongside `VK_DRIVER_FILES` env var pointing to it
+5. Run `npm run dev` in WebX, open `localhost:3000`, boot SteamOS, launch game via Proton
 
 ### Phase 4: Production
 
 - Performance profiling; GPU timestamp queries
 - Shader compilation caching across sessions
-- WASM target (web-sys WebGPU bindings) for pure-browser deployment
-- Public demo page via CheerpX embed
+- WASM target (web-sys WebGPU bindings) for pure-browser deployment without the bridge
+- Public demo page via CheerpX + WebX embed
 
 ## Command Coverage
 

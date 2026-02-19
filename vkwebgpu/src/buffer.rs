@@ -53,6 +53,18 @@ pub unsafe fn create_buffer(
     let buffer_handle = BUFFER_ALLOCATOR.allocate(buffer_data);
     *p_buffer = Handle::from_raw(buffer_handle);
 
+    #[cfg(feature = "webx")]
+    {
+        // payload: handle(u64) + size(u64) + vkUsage(u32)
+        let mut payload = Vec::with_capacity(20);
+        payload.extend_from_slice(&buffer_handle.to_le_bytes());
+        payload.extend_from_slice(&create_info.size.to_le_bytes());
+        payload.extend_from_slice(&create_info.usage.as_raw().to_le_bytes());
+        if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0040, &payload) {
+            log::warn!("[webx] create_buffer IPC failed: {:?}", e);
+        }
+    }
+
     Ok(())
 }
 
@@ -96,7 +108,7 @@ pub unsafe fn bind_buffer_memory(
     *buffer_data.memory_offset.write() = memory_offset;
 
     // Create actual WebGPU buffer
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     {
         let usage = vk_to_wgpu_buffer_usage(buffer_data.usage);
 

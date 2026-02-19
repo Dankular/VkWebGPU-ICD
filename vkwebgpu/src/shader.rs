@@ -50,7 +50,7 @@ impl ShaderCache {
         hasher.finish()
     }
 
-    fn translate_spirv_to_wgsl(spirv: &[u32]) -> Result<String> {
+    pub fn translate_spirv_to_wgsl(spirv: &[u32]) -> Result<String> {
         log::debug!("Translating SPIR-V to WGSL ({} words)", spirv.len());
 
         // Pre-process SPIR-V: split any combined image samplers into separate

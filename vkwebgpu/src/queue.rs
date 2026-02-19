@@ -90,24 +90,29 @@ pub unsafe fn queue_submit(
 
             for &cmd_buffer in cmd_buffers {
                 if let Some(cmd_data) = command_buffer::get_command_buffer_data(cmd_buffer) {
-                    // Replay commands to create WebGPU command buffer
-                    let webgpu_cmd_buffer =
-                        command_buffer::replay_commands(&cmd_data, &device_data.backend)?;
-
-                    #[cfg(not(target_arch = "wasm32"))]
+                    #[cfg(feature = "webx")]
                     {
+                        crate::webx_serialize::submit_frame(&cmd_data)?;
+                    }
+                    #[cfg(not(feature = "webx"))]
+                    {
+                        // Replay commands to create WebGPU command buffer
+                        let webgpu_cmd_buffer =
+                            command_buffer::replay_commands(&cmd_data, &device_data.backend)?;
+
+                        #[cfg(not(target_arch = "wasm32"))]
                         device_data
                             .backend
                             .queue
                             .submit(std::iter::once(webgpu_cmd_buffer));
-                    }
 
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        use wasm_bindgen::JsCast;
-                        let js_array = js_sys::Array::new();
-                        js_array.push(&webgpu_cmd_buffer);
-                        device_data.backend.queue.submit(&js_array);
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            use wasm_bindgen::JsCast;
+                            let js_array = js_sys::Array::new();
+                            js_array.push(&webgpu_cmd_buffer);
+                            device_data.backend.queue.submit(&js_array);
+                        }
                     }
                 }
             }
@@ -172,23 +177,28 @@ pub unsafe fn queue_submit2(
             for info in cmd_buffer_infos {
                 let cmd_buffer = info.command_buffer;
                 if let Some(cmd_data) = command_buffer::get_command_buffer_data(cmd_buffer) {
-                    let webgpu_cmd_buffer =
-                        command_buffer::replay_commands(&cmd_data, &device_data.backend)?;
-
-                    #[cfg(not(target_arch = "wasm32"))]
+                    #[cfg(feature = "webx")]
                     {
+                        crate::webx_serialize::submit_frame(&cmd_data)?;
+                    }
+                    #[cfg(not(feature = "webx"))]
+                    {
+                        let webgpu_cmd_buffer =
+                            command_buffer::replay_commands(&cmd_data, &device_data.backend)?;
+
+                        #[cfg(not(target_arch = "wasm32"))]
                         device_data
                             .backend
                             .queue
                             .submit(std::iter::once(webgpu_cmd_buffer));
-                    }
 
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        use wasm_bindgen::JsCast;
-                        let js_array = js_sys::Array::new();
-                        js_array.push(&webgpu_cmd_buffer);
-                        device_data.backend.queue.submit(&js_array);
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            use wasm_bindgen::JsCast;
+                            let js_array = js_sys::Array::new();
+                            js_array.push(&webgpu_cmd_buffer);
+                            device_data.backend.queue.submit(&js_array);
+                        }
                     }
                 }
             }

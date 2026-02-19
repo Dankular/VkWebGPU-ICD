@@ -22,7 +22,7 @@ pub struct VkPipelineLayoutData {
     pub device: vk::Device,
     pub set_layouts: Vec<vk::DescriptorSetLayout>,
     pub push_constant_ranges: Vec<vk::PushConstantRange>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub wgpu_layout: Arc<wgpu::PipelineLayout>,
 }
 
@@ -35,13 +35,13 @@ pub enum VkPipelineData {
     Graphics {
         device: vk::Device,
         layout: vk::PipelineLayout,
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         wgpu_pipeline: Arc<wgpu::RenderPipeline>,
     },
     Compute {
         device: vk::Device,
         layout: vk::PipelineLayout,
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         wgpu_pipeline: Arc<wgpu::ComputePipeline>,
     },
 }
@@ -58,10 +58,33 @@ pub unsafe fn create_shader_module(
 
     debug!("Creating shader module with {} SPIR-V words", spirv.len());
 
+    #[cfg(feature = "webx")]
+    let spirv_snap = spirv.clone();
+
     let module_data = VkShaderModuleData { device, spirv };
 
     let module_handle = SHADER_MODULE_ALLOCATOR.allocate(module_data);
     *p_shader_module = Handle::from_raw(module_handle);
+
+    #[cfg(feature = "webx")]
+    {
+        match crate::shader::translate_spirv_to_wgsl(&spirv_snap) {
+            Ok(wgsl) => {
+                let wgsl_bytes = wgsl.as_bytes();
+                // payload: handle(u64) + wgslLen(u32) + wgsl[...]
+                let mut payload = Vec::with_capacity(12 + wgsl_bytes.len());
+                payload.extend_from_slice(&module_handle.to_le_bytes());
+                payload.extend_from_slice(&(wgsl_bytes.len() as u32).to_le_bytes());
+                payload.extend_from_slice(wgsl_bytes);
+                if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0050, &payload) {
+                    log::warn!("[webx] create_shader_module IPC failed: {:?}", e);
+                }
+            }
+            Err(e) => {
+                log::warn!("[webx] SPIRV→WGSL translation failed for module {}: {:?}", module_handle, e);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -115,7 +138,7 @@ pub unsafe fn create_pipeline_layout(
     let device_data = device::get_device_data(device)
         .ok_or_else(|| VkError::InvalidHandle("Invalid device".to_string()))?;
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     let wgpu_layout = {
         // Keep Arc references alive for the lifetime of bind_group_layouts
         let layout_datas: Vec<_> = set_layouts
@@ -144,16 +167,38 @@ pub unsafe fn create_pipeline_layout(
             })
     };
 
+    #[cfg(feature = "webx")]
+    let (ipc_set_layout_handles, ipc_has_push) = {
+        let raw: Vec<u64> = set_layouts.iter().map(|sl| sl.as_raw()).collect();
+        let has_push = !push_constant_ranges.is_empty();
+        (raw, has_push)
+    };
+
     let layout_data = VkPipelineLayoutData {
         device,
         set_layouts,
         push_constant_ranges,
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         wgpu_layout: Arc::new(wgpu_layout),
     };
 
     let layout_handle = PIPELINE_LAYOUT_ALLOCATOR.allocate(layout_data);
     *p_pipeline_layout = Handle::from_raw(layout_handle);
+
+    #[cfg(feature = "webx")]
+    {
+        // payload: handle(u64) + hasPush(u32) + setCount(u32) + setLayouts[](u64)
+        let mut payload = Vec::with_capacity(16 + ipc_set_layout_handles.len() * 8);
+        payload.extend_from_slice(&layout_handle.to_le_bytes());
+        payload.extend_from_slice(&(ipc_has_push as u32).to_le_bytes());
+        payload.extend_from_slice(&(ipc_set_layout_handles.len() as u32).to_le_bytes());
+        for &sl in &ipc_set_layout_handles {
+            payload.extend_from_slice(&sl.to_le_bytes());
+        }
+        if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0052, &payload) {
+            log::warn!("[webx] create_pipeline_layout IPC failed: {:?}", e);
+        }
+    }
 
     Ok(())
 }
@@ -187,24 +232,29 @@ pub unsafe fn create_graphics_pipelines(
     for (i, create_info) in create_infos.iter().enumerate() {
         debug!("Creating graphics pipeline {}/{}", i + 1, create_info_count);
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         let wgpu_pipeline = create_wgpu_render_pipeline(device, create_info, &device_data)?;
 
         let pipeline_data = VkPipelineData::Graphics {
             device,
             layout: create_info.layout,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
             wgpu_pipeline: Arc::new(wgpu_pipeline),
         };
 
         let pipeline_handle = PIPELINE_ALLOCATOR.allocate(pipeline_data);
         pipelines[i] = Handle::from_raw(pipeline_handle);
+
+        #[cfg(feature = "webx")]
+        if let Err(e) = serialize_and_send_graphics_pipeline(pipeline_handle, create_info) {
+            log::warn!("[webx] create_graphics_pipeline IPC failed: {:?}", e);
+        }
     }
 
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 unsafe fn create_wgpu_render_pipeline(
     _device: vk::Device,
     create_info: &vk::GraphicsPipelineCreateInfo,
@@ -587,7 +637,7 @@ pub unsafe fn create_compute_pipelines(
     for (i, create_info) in create_infos.iter().enumerate() {
         debug!("Creating compute pipeline {}/{}", i + 1, create_info_count);
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         let wgpu_pipeline = {
             // Get pipeline layout
             let layout_data = PIPELINE_LAYOUT_ALLOCATOR
@@ -637,18 +687,41 @@ pub unsafe fn create_compute_pipelines(
         let pipeline_data = VkPipelineData::Compute {
             device,
             layout: create_info.layout,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
             wgpu_pipeline: Arc::new(wgpu_pipeline),
         };
 
         let pipeline_handle = PIPELINE_ALLOCATOR.allocate(pipeline_data);
         pipelines[i] = Handle::from_raw(pipeline_handle);
+
+        #[cfg(feature = "webx")]
+        {
+            // payload: handle(u64) + layoutHandle(u64) + moduleHandle(u64) + entryLen(u32) + entry bytes
+            let entry_bytes: Vec<u8> = if !create_info.stage.p_name.is_null() {
+                CStr::from_ptr(create_info.stage.p_name)
+                    .to_str()
+                    .unwrap_or("main")
+                    .as_bytes()
+                    .to_vec()
+            } else {
+                b"main".to_vec()
+            };
+            let mut payload = Vec::with_capacity(28 + entry_bytes.len());
+            payload.extend_from_slice(&pipeline_handle.to_le_bytes());
+            payload.extend_from_slice(&create_info.layout.as_raw().to_le_bytes());
+            payload.extend_from_slice(&create_info.stage.module.as_raw().to_le_bytes());
+            payload.extend_from_slice(&(entry_bytes.len() as u32).to_le_bytes());
+            payload.extend_from_slice(&entry_bytes);
+            if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0055, &payload) {
+                log::warn!("[webx] create_compute_pipeline IPC failed: {:?}", e);
+            }
+        }
     }
 
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_vertex_format(format: vk::Format) -> wgpu::VertexFormat {
     match format {
         vk::Format::R32_SFLOAT => wgpu::VertexFormat::Float32,
@@ -675,7 +748,7 @@ fn vk_to_wgpu_vertex_format(format: vk::Format) -> wgpu::VertexFormat {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_blend_factor(factor: vk::BlendFactor) -> wgpu::BlendFactor {
     match factor {
         vk::BlendFactor::ZERO => wgpu::BlendFactor::Zero,
@@ -694,7 +767,7 @@ fn vk_to_wgpu_blend_factor(factor: vk::BlendFactor) -> wgpu::BlendFactor {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_blend_operation(op: vk::BlendOp) -> wgpu::BlendOperation {
     match op {
         vk::BlendOp::ADD => wgpu::BlendOperation::Add,
@@ -706,7 +779,7 @@ fn vk_to_wgpu_blend_operation(op: vk::BlendOp) -> wgpu::BlendOperation {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_color_write_mask(mask: vk::ColorComponentFlags) -> wgpu::ColorWrites {
     let mut writes = wgpu::ColorWrites::empty();
     if mask.contains(vk::ColorComponentFlags::R) {
@@ -724,7 +797,7 @@ fn vk_to_wgpu_color_write_mask(mask: vk::ColorComponentFlags) -> wgpu::ColorWrit
     writes
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_compare_function(op: vk::CompareOp) -> wgpu::CompareFunction {
     match op {
         vk::CompareOp::NEVER => wgpu::CompareFunction::Never,
@@ -739,7 +812,7 @@ fn vk_to_wgpu_compare_function(op: vk::CompareOp) -> wgpu::CompareFunction {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_stencil_operation(op: vk::StencilOp) -> wgpu::StencilOperation {
     match op {
         vk::StencilOp::KEEP => wgpu::StencilOperation::Keep,
@@ -754,7 +827,7 @@ fn vk_to_wgpu_stencil_operation(op: vk::StencilOp) -> wgpu::StencilOperation {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_stencil_face_state(state: &vk::StencilOpState) -> wgpu::StencilFaceState {
     wgpu::StencilFaceState {
         compare: vk_to_wgpu_compare_function(state.compare_op),
@@ -764,7 +837,7 @@ fn vk_to_wgpu_stencil_face_state(state: &vk::StencilOpState) -> wgpu::StencilFac
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_primitive_topology(topology: vk::PrimitiveTopology) -> wgpu::PrimitiveTopology {
     match topology {
         vk::PrimitiveTopology::POINT_LIST => wgpu::PrimitiveTopology::PointList,
@@ -774,6 +847,158 @@ fn vk_to_wgpu_primitive_topology(topology: vk::PrimitiveTopology) -> wgpu::Primi
         vk::PrimitiveTopology::TRIANGLE_STRIP => wgpu::PrimitiveTopology::TriangleStrip,
         _ => wgpu::PrimitiveTopology::TriangleList,
     }
+}
+
+/// Serialize a VkGraphicsPipelineCreateInfo to the webx IPC format and send it.
+/// cmd 0x0054 payload:
+///   handle(u64) + layoutHandle(u64) + stageCount(u32) +
+///   stages[](stageFlags:u32 + moduleHandle:u64 + entryLen:u32 + entry bytes) +
+///   colorFmtCount(u32) + colorFmts[](u32) + depthFmt(u32) +
+///   vtxBindCount(u32) + vtxBindings[](binding:u32+stride:u32+rate:u32+attrCount:u32+attrs[](loc+bind+fmt+off)) +
+///   topology(u32) + polygonMode(u32) + cullMode(u32) + frontFace(u32) +
+///   depthTestEnable(u32) + depthWriteEnable(u32) + depthCompareOp(u32) +
+///   blendCount(u32) + blends[](enable+srcCol+dstCol+colOp+srcAlpha+dstAlpha+alphaOp+writeMask × u32)
+#[cfg(feature = "webx")]
+unsafe fn serialize_and_send_graphics_pipeline(
+    pipeline_handle: u64,
+    create_info: &vk::GraphicsPipelineCreateInfo,
+) -> crate::error::Result<()> {
+    let mut payload: Vec<u8> = Vec::new();
+
+    payload.extend_from_slice(&pipeline_handle.to_le_bytes());
+    payload.extend_from_slice(&create_info.layout.as_raw().to_le_bytes());
+
+    // Shader stages
+    let stages = if create_info.stage_count > 0 && !create_info.p_stages.is_null() {
+        std::slice::from_raw_parts(create_info.p_stages, create_info.stage_count as usize)
+    } else {
+        &[]
+    };
+    payload.extend_from_slice(&(stages.len() as u32).to_le_bytes());
+    for stage in stages {
+        payload.extend_from_slice(&stage.stage.as_raw().to_le_bytes());
+        payload.extend_from_slice(&stage.module.as_raw().to_le_bytes());
+        let entry = if !stage.p_name.is_null() {
+            CStr::from_ptr(stage.p_name).to_str().unwrap_or("main").as_bytes().to_vec()
+        } else {
+            b"main".to_vec()
+        };
+        payload.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&entry);
+    }
+
+    // Color/depth formats from pNext chain (VkPipelineRenderingCreateInfo)
+    let mut color_vk_formats: Vec<vk::Format> = Vec::new();
+    let mut depth_vk_format = vk::Format::UNDEFINED;
+    let mut p_next = create_info.p_next as *const vk::BaseInStructure;
+    while !p_next.is_null() {
+        let base = &*p_next;
+        if base.s_type == vk::StructureType::PIPELINE_RENDERING_CREATE_INFO {
+            let pri = &*(p_next as *const vk::PipelineRenderingCreateInfo);
+            if pri.color_attachment_count > 0 && !pri.p_color_attachment_formats.is_null() {
+                color_vk_formats = std::slice::from_raw_parts(
+                    pri.p_color_attachment_formats,
+                    pri.color_attachment_count as usize,
+                ).to_vec();
+            }
+            depth_vk_format = pri.depth_attachment_format;
+            break;
+        }
+        p_next = base.p_next;
+    }
+    payload.extend_from_slice(&(color_vk_formats.len() as u32).to_le_bytes());
+    for fmt in &color_vk_formats {
+        payload.extend_from_slice(&(fmt.as_raw() as u32).to_le_bytes());
+    }
+    payload.extend_from_slice(&(depth_vk_format.as_raw() as u32).to_le_bytes());
+
+    // Vertex input state
+    if !create_info.p_vertex_input_state.is_null() {
+        let vis = &*create_info.p_vertex_input_state;
+        let bindings = if vis.vertex_binding_description_count > 0 && !vis.p_vertex_binding_descriptions.is_null() {
+            std::slice::from_raw_parts(vis.p_vertex_binding_descriptions, vis.vertex_binding_description_count as usize)
+        } else {
+            &[]
+        };
+        let attrs = if vis.vertex_attribute_description_count > 0 && !vis.p_vertex_attribute_descriptions.is_null() {
+            std::slice::from_raw_parts(vis.p_vertex_attribute_descriptions, vis.vertex_attribute_description_count as usize)
+        } else {
+            &[]
+        };
+        payload.extend_from_slice(&(bindings.len() as u32).to_le_bytes());
+        for b in bindings {
+            payload.extend_from_slice(&b.binding.to_le_bytes());
+            payload.extend_from_slice(&b.stride.to_le_bytes());
+            payload.extend_from_slice(&(b.input_rate.as_raw() as u32).to_le_bytes());
+            let b_attrs: Vec<_> = attrs.iter().filter(|a| a.binding == b.binding).collect();
+            payload.extend_from_slice(&(b_attrs.len() as u32).to_le_bytes());
+            for a in b_attrs {
+                payload.extend_from_slice(&a.location.to_le_bytes());
+                payload.extend_from_slice(&a.binding.to_le_bytes());
+                payload.extend_from_slice(&(a.format.as_raw() as u32).to_le_bytes());
+                payload.extend_from_slice(&a.offset.to_le_bytes());
+            }
+        }
+    } else {
+        payload.extend_from_slice(&0u32.to_le_bytes());
+    }
+
+    // Input assembly topology
+    let topology: u32 = if !create_info.p_input_assembly_state.is_null() {
+        (*create_info.p_input_assembly_state).topology.as_raw() as u32
+    } else {
+        3 // VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+    };
+    payload.extend_from_slice(&topology.to_le_bytes());
+
+    // Rasterization state
+    if !create_info.p_rasterization_state.is_null() {
+        let rs = &*create_info.p_rasterization_state;
+        payload.extend_from_slice(&(rs.polygon_mode.as_raw() as u32).to_le_bytes());
+        payload.extend_from_slice(&rs.cull_mode.as_raw().to_le_bytes());
+        payload.extend_from_slice(&(rs.front_face.as_raw() as u32).to_le_bytes());
+    } else {
+        payload.extend_from_slice(&0u32.to_le_bytes()); // FILL
+        payload.extend_from_slice(&0u32.to_le_bytes()); // NONE
+        payload.extend_from_slice(&0u32.to_le_bytes()); // CCW
+    }
+
+    // Depth/stencil state
+    if !create_info.p_depth_stencil_state.is_null() {
+        let dss = &*create_info.p_depth_stencil_state;
+        payload.extend_from_slice(&(dss.depth_test_enable as u32).to_le_bytes());
+        payload.extend_from_slice(&(dss.depth_write_enable as u32).to_le_bytes());
+        payload.extend_from_slice(&(dss.depth_compare_op.as_raw() as u32).to_le_bytes());
+    } else {
+        payload.extend_from_slice(&0u32.to_le_bytes()); // test disabled
+        payload.extend_from_slice(&0u32.to_le_bytes()); // write disabled
+        payload.extend_from_slice(&1u32.to_le_bytes()); // LESS
+    }
+
+    // Color blend attachments
+    if !create_info.p_color_blend_state.is_null() {
+        let cbs = &*create_info.p_color_blend_state;
+        let att_slice = if cbs.attachment_count > 0 && !cbs.p_attachments.is_null() {
+            std::slice::from_raw_parts(cbs.p_attachments, cbs.attachment_count as usize)
+        } else {
+            &[]
+        };
+        payload.extend_from_slice(&(att_slice.len() as u32).to_le_bytes());
+        for a in att_slice {
+            payload.extend_from_slice(&(a.blend_enable as u32).to_le_bytes());
+            payload.extend_from_slice(&(a.src_color_blend_factor.as_raw() as u32).to_le_bytes());
+            payload.extend_from_slice(&(a.dst_color_blend_factor.as_raw() as u32).to_le_bytes());
+            payload.extend_from_slice(&(a.color_blend_op.as_raw() as u32).to_le_bytes());
+            payload.extend_from_slice(&(a.src_alpha_blend_factor.as_raw() as u32).to_le_bytes());
+            payload.extend_from_slice(&(a.dst_alpha_blend_factor.as_raw() as u32).to_le_bytes());
+            payload.extend_from_slice(&(a.alpha_blend_op.as_raw() as u32).to_le_bytes());
+            payload.extend_from_slice(&a.color_write_mask.as_raw().to_le_bytes());
+        }
+    } else {
+        payload.extend_from_slice(&0u32.to_le_bytes());
+    }
+
+    crate::webx_ipc::WebXIpc::global().send_cmd(0x0054, &payload)
 }
 
 pub unsafe fn destroy_pipeline(

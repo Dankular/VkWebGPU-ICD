@@ -34,6 +34,14 @@ pub mod push_constants;
 pub mod query;
 pub mod icd;
 
+// WebX IPC backend — only compiled when the `webx` feature is active.
+// Provides the x86 I/O port transport and RecordedCommand serializer
+// that replaces wgpu GPU calls with a single bulk IPC transfer per frame.
+#[cfg(feature = "webx")]
+pub mod webx_ipc;
+#[cfg(feature = "webx")]
+pub mod webx_serialize;
+
 use log::info;
 
 /// Initialize the VkWebGPU ICD

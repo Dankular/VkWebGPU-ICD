@@ -84,6 +84,22 @@ pub unsafe fn create_image(
     let image_handle = IMAGE_ALLOCATOR.allocate(image_data);
     *p_image = Handle::from_raw(image_handle);
 
+    #[cfg(feature = "webx")]
+    {
+        // payload: handle(u64) + width(u32) + height(u32) + depth(u32) + vkFmt(u32) + vkUsage(u32) + mipLevels(u32)
+        let mut payload = Vec::with_capacity(32);
+        payload.extend_from_slice(&image_handle.to_le_bytes());
+        payload.extend_from_slice(&create_info.extent.width.to_le_bytes());
+        payload.extend_from_slice(&create_info.extent.height.to_le_bytes());
+        payload.extend_from_slice(&create_info.extent.depth.to_le_bytes());
+        payload.extend_from_slice(&(create_info.format.as_raw() as u32).to_le_bytes());
+        payload.extend_from_slice(&create_info.usage.as_raw().to_le_bytes());
+        payload.extend_from_slice(&create_info.mip_levels.to_le_bytes());
+        if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0043, &payload) {
+            log::warn!("[webx] create_image IPC failed: {:?}", e);
+        }
+    }
+
     Ok(())
 }
 
@@ -116,7 +132,7 @@ pub unsafe fn bind_image_memory(
     *image_data.memory.write() = Some(memory);
     *image_data.memory_offset.write() = memory_offset;
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     {
         let format =
             format::vk_to_wgpu_format(image_data.format).ok_or(VkError::FormatNotSupported)?;
@@ -219,7 +235,7 @@ pub unsafe fn create_image_view(
         wgpu_view: RwLock::new(None),
     };
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     {
         if let Some(texture) = image_data.wgpu_texture.read().as_ref() {
             let aspect = if create_info
@@ -278,6 +294,23 @@ pub unsafe fn create_image_view(
 
     let view_handle = IMAGE_VIEW_ALLOCATOR.allocate(view_data);
     *p_view = Handle::from_raw(view_handle);
+
+    #[cfg(feature = "webx")]
+    {
+        // payload: handle(u64) + imageHandle(u64) + vkFmt(u32) + aspectMask(u32) + baseMip(u32) + levelCount(u32) + baseLayer(u32) + layerCount(u32)
+        let mut payload = Vec::with_capacity(40);
+        payload.extend_from_slice(&view_handle.to_le_bytes());
+        payload.extend_from_slice(&create_info.image.as_raw().to_le_bytes());
+        payload.extend_from_slice(&(create_info.format.as_raw() as u32).to_le_bytes());
+        payload.extend_from_slice(&create_info.subresource_range.aspect_mask.as_raw().to_le_bytes());
+        payload.extend_from_slice(&create_info.subresource_range.base_mip_level.to_le_bytes());
+        payload.extend_from_slice(&create_info.subresource_range.level_count.to_le_bytes());
+        payload.extend_from_slice(&create_info.subresource_range.base_array_layer.to_le_bytes());
+        payload.extend_from_slice(&create_info.subresource_range.layer_count.to_le_bytes());
+        if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0046, &payload) {
+            log::warn!("[webx] create_image_view IPC failed: {:?}", e);
+        }
+    }
 
     Ok(())
 }
@@ -417,6 +450,41 @@ pub fn create_swapchain_image(
         memory: RwLock::new(None),
         memory_offset: RwLock::new(0),
         wgpu_texture: RwLock::new(Some(Arc::new(wgpu_texture))),
+    };
+    let handle = IMAGE_ALLOCATOR.allocate(image_data);
+    vk::Image::from_raw(handle)
+}
+
+/// Create a stub VkImage for swapchain slots that have no local wgpu texture (webx path).
+#[cfg(feature = "webx")]
+pub fn create_swapchain_image_stub(
+    device: vk::Device,
+    format: vk::Format,
+    extent: vk::Extent2D,
+) -> vk::Image {
+    let image_data = VkImageData {
+        device,
+        image_type: vk::ImageType::TYPE_2D,
+        format,
+        extent: vk::Extent3D {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+        },
+        mip_levels: 1,
+        array_layers: 1,
+        samples: vk::SampleCountFlags::TYPE_1,
+        tiling: vk::ImageTiling::OPTIMAL,
+        usage: vk::ImageUsageFlags::COLOR_ATTACHMENT
+            | vk::ImageUsageFlags::TRANSFER_SRC
+            | vk::ImageUsageFlags::TRANSFER_DST
+            | vk::ImageUsageFlags::SAMPLED,
+        sharing_mode: vk::SharingMode::EXCLUSIVE,
+        initial_layout: vk::ImageLayout::UNDEFINED,
+        memory: RwLock::new(None),
+        memory_offset: RwLock::new(0),
+        #[cfg(not(target_arch = "wasm32"))]
+        wgpu_texture: RwLock::new(None),
     };
     let handle = IMAGE_ALLOCATOR.allocate(image_data);
     vk::Image::from_raw(handle)

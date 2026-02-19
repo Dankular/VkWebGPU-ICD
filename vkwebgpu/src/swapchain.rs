@@ -37,18 +37,18 @@ pub static SWAPCHAIN_ALLOCATOR: Lazy<HandleAllocator<VkSwapchainData>> =
 /// # Safety
 /// The caller (the Vulkan app) is responsible for keeping the Win32 window alive
 /// for the duration of the swapchain.  We only store integer copies of the handles.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 struct Win32SurfaceWindow {
     hwnd: std::num::NonZeroIsize,
     hinstance: std::num::NonZeroIsize,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 unsafe impl Send for Win32SurfaceWindow {}
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 unsafe impl Sync for Win32SurfaceWindow {}
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 impl wgpu::rwh::HasWindowHandle for Win32SurfaceWindow {
     fn window_handle(
         &self,
@@ -63,7 +63,7 @@ impl wgpu::rwh::HasWindowHandle for Win32SurfaceWindow {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 impl wgpu::rwh::HasDisplayHandle for Win32SurfaceWindow {
     fn display_handle(
         &self,
@@ -100,21 +100,21 @@ pub struct VkSwapchainData {
     pub current_image_index: AtomicU32,
 
     /// Real wgpu::Surface for Win32 window presentation (None in headless/browser mode).
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub wgpu_surface: Option<wgpu::Surface<'static>>,
 
     /// Format actually configured on the wgpu surface (may differ from the Vulkan
     /// swapchain format if the surface didn't support it directly).
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub wgpu_surface_format: wgpu::TextureFormat,
 
     /// Present blit pipeline: used when the surface format differs from the
     /// offscreen texture format and a copy_texture_to_texture is not valid.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub blit_pipeline: Option<Arc<wgpu::RenderPipeline>>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub blit_bind_group_layout: Option<Arc<wgpu::BindGroupLayout>>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub blit_sampler: Option<Arc<wgpu::Sampler>>,
 }
 
@@ -136,7 +136,7 @@ unsafe fn get_swapchain_data(swapchain: vk::SwapchainKHR) -> Result<Arc<VkSwapch
 // and outputs to the render attachment (the wgpu surface texture).
 // This handles format-converting copies (e.g. sRGB ↔ UNORM) correctly.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 const PRESENT_BLIT_WGSL: &str = r#"
 struct VertOut {
     @builtin(position) pos: vec4<f32>,
@@ -199,10 +199,12 @@ pub unsafe fn create_swapchain_khr(
         .ok_or_else(|| VkError::InvalidHandle("Invalid device".to_string()))?;
 
     // Map the Vulkan format to a wgpu TextureFormat for the offscreen render targets.
+    #[cfg(not(feature = "webx"))]
     let wgpu_format = format::vk_to_wgpu_format(create_info.image_format)
         .unwrap_or(wgpu::TextureFormat::Bgra8Unorm);
 
     // Build wgpu texture usage flags from the application request.
+    #[cfg(not(feature = "webx"))]
     let wgpu_usage = {
         let mut u = wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::COPY_SRC
@@ -217,8 +219,9 @@ pub unsafe fn create_swapchain_khr(
         u
     };
 
-    // Create one real wgpu Texture per swapchain image and register each as a VkImage.
+    // Create one wgpu Texture per swapchain image and register each as a VkImage.
     let mut images: Vec<vk::Image> = Vec::with_capacity(image_count as usize);
+    #[cfg(not(feature = "webx"))]
     for idx in 0..image_count {
         let texture = device_data.backend.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&format!("SwapchainImage[{}]", idx)),
@@ -244,9 +247,19 @@ pub unsafe fn create_swapchain_khr(
         images.push(vk_image);
         debug!("Created swapchain image[{}]: {:?}", idx, vk_image);
     }
+    #[cfg(feature = "webx")]
+    for idx in 0..image_count {
+        let vk_image = image::create_swapchain_image_stub(
+            device,
+            create_info.image_format,
+            create_info.image_extent,
+        );
+        images.push(vk_image);
+        debug!("Created stub swapchain image[{}]: {:?}", idx, vk_image);
+    }
 
     // --- Real wgpu::Surface for Win32 presentation ---
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     let (wgpu_surface, wgpu_surface_format, blit_pipeline, blit_bind_group_layout, blit_sampler) =
         create_wgpu_surface(create_info, &device_data.backend, wgpu_format);
 
@@ -264,15 +277,15 @@ pub unsafe fn create_swapchain_khr(
         present_mode: create_info.present_mode,
         images,
         current_image_index: AtomicU32::new(0),
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         wgpu_surface,
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         wgpu_surface_format,
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         blit_pipeline,
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         blit_bind_group_layout,
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         blit_sampler,
     };
 
@@ -289,7 +302,7 @@ pub unsafe fn create_swapchain_khr(
 ///
 /// Returns a tuple: (surface, surface_format, blit_pipeline, blit_layout, blit_sampler).
 /// All values are None on failure or in headless/browser mode.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn create_wgpu_surface(
     create_info: &vk::SwapchainCreateInfoKHR,
     backend: &crate::backend::WebGPUBackend,
@@ -390,7 +403,7 @@ fn create_wgpu_surface(
 }
 
 /// Return the sRGB ↔ linear sibling of a texture format (if one exists).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn sibling_format(fmt: wgpu::TextureFormat) -> wgpu::TextureFormat {
     match fmt {
         wgpu::TextureFormat::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8Unorm,
@@ -402,7 +415,7 @@ fn sibling_format(fmt: wgpu::TextureFormat) -> wgpu::TextureFormat {
 }
 
 /// Map a Vulkan present mode to the closest wgpu equivalent.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_present_mode_to_wgpu(mode: vk::PresentModeKHR) -> wgpu::PresentMode {
     match mode {
         vk::PresentModeKHR::IMMEDIATE => wgpu::PresentMode::Immediate,
@@ -416,7 +429,7 @@ fn vk_present_mode_to_wgpu(mode: vk::PresentModeKHR) -> wgpu::PresentMode {
 ///
 /// The pipeline renders a fullscreen triangle that samples from `src_format`
 /// and writes to `dst_format` (the surface).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn build_blit_pipeline(
     device: &wgpu::Device,
     _src_format: wgpu::TextureFormat,
@@ -631,7 +644,7 @@ pub unsafe fn queue_present_khr(
         }
 
         // --- Real Win32 presentation ---
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         present_to_wgpu_surface(&swapchain_data, image_index as usize)?;
 
         if !present_info.p_results.is_null() {
@@ -652,7 +665,7 @@ pub unsafe fn queue_present_khr(
 
 /// Blit the offscreen swapchain texture at `image_index` into the wgpu surface
 /// texture and call `present()`.  Does nothing if there is no real surface.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn present_to_wgpu_surface(
     swapchain_data: &VkSwapchainData,
     image_index: usize,

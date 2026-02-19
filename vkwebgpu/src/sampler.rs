@@ -29,7 +29,7 @@ pub struct VkSamplerData {
     pub min_lod: f32,
     pub max_lod: f32,
     pub border_color: vk::BorderColor,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     pub wgpu_sampler: Arc<wgpu::Sampler>,
 }
 
@@ -49,7 +49,7 @@ pub unsafe fn create_sampler(
     let device_data = device::get_device_data(device)
         .ok_or_else(|| VkError::InvalidHandle("Invalid device".to_string()))?;
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     let wgpu_sampler = {
         let address_mode_u = vk_to_wgpu_address_mode(create_info.address_mode_u);
         let address_mode_v = vk_to_wgpu_address_mode(create_info.address_mode_v);
@@ -112,12 +112,31 @@ pub unsafe fn create_sampler(
         min_lod: create_info.min_lod,
         max_lod: create_info.max_lod,
         border_color: create_info.border_color,
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
         wgpu_sampler: Arc::new(wgpu_sampler),
     };
 
     let sampler_handle = SAMPLER_ALLOCATOR.allocate(sampler_data);
     *p_sampler = Handle::from_raw(sampler_handle);
+
+    #[cfg(feature = "webx")]
+    {
+        // payload: handle(u64) + magFilter(u32) + minFilter(u32) + mipmapMode(u32) + addrU(u32) + addrV(u32) + addrW(u32) + mipLodBias(f32) + anisotropyEnable(u32) + maxAnisotropy(f32)
+        let mut payload = Vec::with_capacity(44);
+        payload.extend_from_slice(&sampler_handle.to_le_bytes());
+        payload.extend_from_slice(&(create_info.mag_filter.as_raw() as u32).to_le_bytes());
+        payload.extend_from_slice(&(create_info.min_filter.as_raw() as u32).to_le_bytes());
+        payload.extend_from_slice(&(create_info.mipmap_mode.as_raw() as u32).to_le_bytes());
+        payload.extend_from_slice(&(create_info.address_mode_u.as_raw() as u32).to_le_bytes());
+        payload.extend_from_slice(&(create_info.address_mode_v.as_raw() as u32).to_le_bytes());
+        payload.extend_from_slice(&(create_info.address_mode_w.as_raw() as u32).to_le_bytes());
+        payload.extend_from_slice(&create_info.mip_lod_bias.to_le_bytes());
+        payload.extend_from_slice(&create_info.anisotropy_enable.to_le_bytes());
+        payload.extend_from_slice(&create_info.max_anisotropy.to_le_bytes());
+        if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0048, &payload) {
+            log::warn!("[webx] create_sampler IPC failed: {:?}", e);
+        }
+    }
 
     Ok(())
 }
@@ -131,7 +150,7 @@ pub unsafe fn destroy_sampler(_device: vk::Device, sampler: vk::Sampler, _p_allo
     debug!("Destroyed sampler");
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_address_mode(mode: vk::SamplerAddressMode) -> wgpu::AddressMode {
     match mode {
         vk::SamplerAddressMode::REPEAT => wgpu::AddressMode::Repeat,
@@ -142,7 +161,7 @@ fn vk_to_wgpu_address_mode(mode: vk::SamplerAddressMode) -> wgpu::AddressMode {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_filter_mode(filter: vk::Filter) -> wgpu::FilterMode {
     match filter {
         vk::Filter::NEAREST => wgpu::FilterMode::Nearest,
@@ -151,7 +170,7 @@ fn vk_to_wgpu_filter_mode(filter: vk::Filter) -> wgpu::FilterMode {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_mipmap_filter(mode: vk::SamplerMipmapMode) -> wgpu::FilterMode {
     match mode {
         vk::SamplerMipmapMode::NEAREST => wgpu::FilterMode::Nearest,
@@ -160,7 +179,7 @@ fn vk_to_wgpu_mipmap_filter(mode: vk::SamplerMipmapMode) -> wgpu::FilterMode {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
 fn vk_to_wgpu_compare_function(op: vk::CompareOp) -> wgpu::CompareFunction {
     match op {
         vk::CompareOp::NEVER => wgpu::CompareFunction::Never,

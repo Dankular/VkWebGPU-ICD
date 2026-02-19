@@ -126,7 +126,11 @@ pub unsafe fn create_instance(
     );
 
     // Create WebGPU backend once for the instance
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
+    let backend = Some(Arc::new(WebGPUBackend::new()?));
+
+    // WebX: stub backend (no local wgpu device; all GPU work is IPC to the browser host)
+    #[cfg(feature = "webx")]
     let backend = Some(Arc::new(WebGPUBackend::new()?));
 
     #[cfg(target_arch = "wasm32")]
@@ -177,7 +181,7 @@ fn enumerate_physical_devices_internal(instance: vk::Instance) -> Result<()> {
     let backend = instance_data.backend.clone();
 
     // Get adapter info
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     let adapter_info = {
         let info = backend.as_ref().unwrap().adapter.get_info();
         AdapterInfo {
@@ -192,6 +196,15 @@ fn enumerate_physical_devices_internal(instance: vk::Instance) -> Result<()> {
                 wgpu::DeviceType::Other => vk::PhysicalDeviceType::OTHER,
             },
         }
+    };
+
+    // WebX: report a virtual browser GPU adapter (real GPU info comes from the host)
+    #[cfg(feature = "webx")]
+    let adapter_info = AdapterInfo {
+        name: String::from("WebGPU Browser Adapter"),
+        vendor_id: 0x1414, // Microsoft virtual device ID (placeholder)
+        device_id: 0x0001,
+        device_type: vk::PhysicalDeviceType::VIRTUAL_GPU,
     };
 
     #[cfg(target_arch = "wasm32")]

@@ -92,6 +92,11 @@ pub unsafe fn create_device(
     };
 
     // Initialize push constant ring buffer for DXVK compatibility
+    #[cfg(feature = "webx")]
+    let push_constant_buffer = Arc::new(PushConstantRingBuffer::new_stub(
+        PushConstantRingBuffer::DEFAULT_CAPACITY,
+    ));
+    #[cfg(not(feature = "webx"))]
     let push_constant_buffer = Arc::new(PushConstantRingBuffer::new(
         &backend.device,
         PushConstantRingBuffer::DEFAULT_CAPACITY,
@@ -211,7 +216,7 @@ pub unsafe fn device_wait_idle(device: vk::Device) -> Result<()> {
     let device_data = get_device_data(device)
         .ok_or_else(|| VkError::InvalidHandle("Invalid device".to_string()))?;
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "webx")))]
     {
         device_data.backend.device.poll(wgpu::Maintain::Wait);
     }
@@ -219,6 +224,11 @@ pub unsafe fn device_wait_idle(device: vk::Device) -> Result<()> {
     #[cfg(target_arch = "wasm32")]
     {
         // WASM: would need to use promises
+    }
+
+    #[cfg(feature = "webx")]
+    {
+        // WebX: host handles GPU sync; no local device to poll
     }
 
     Ok(())
