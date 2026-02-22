@@ -93,6 +93,13 @@ pub unsafe fn create_render_pass(
         subpasses.len()
     );
 
+    #[cfg(feature = "webx")]
+    let ipc_depth_indices: Vec<u32> = subpasses.iter()
+        .filter_map(|sp| sp.depth_stencil_attachment_index)
+        .collect();
+    #[cfg(feature = "webx")]
+    let ipc_attachments: Vec<vk::AttachmentDescription> = attachments.clone();
+
     let render_pass_data = VkRenderPassData {
         device,
         attachments,
@@ -102,6 +109,24 @@ pub unsafe fn create_render_pass(
 
     let render_pass_handle = RENDER_PASS_ALLOCATOR.allocate(render_pass_data);
     *p_render_pass = Handle::from_raw(render_pass_handle);
+
+    #[cfg(feature = "webx")]
+    {
+        // payload: handle(u64) + attachCount(u32) + per-att: fmt(u32)+loadOp(u32)+storeOp(u32)+isDepth(u32)
+        let mut payload = Vec::with_capacity(12 + ipc_attachments.len() * 16);
+        payload.extend_from_slice(&render_pass_handle.to_le_bytes());
+        payload.extend_from_slice(&(ipc_attachments.len() as u32).to_le_bytes());
+        for (i, att) in ipc_attachments.iter().enumerate() {
+            let is_depth: u32 = if ipc_depth_indices.contains(&(i as u32)) { 1 } else { 0 };
+            payload.extend_from_slice(&(att.format.as_raw() as u32).to_le_bytes());
+            payload.extend_from_slice(&(att.load_op.as_raw() as u32).to_le_bytes());
+            payload.extend_from_slice(&(att.store_op.as_raw() as u32).to_le_bytes());
+            payload.extend_from_slice(&is_depth.to_le_bytes());
+        }
+        if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0057, &payload) {
+            log::warn!("[webx] create_render_pass IPC failed: {:?}", e);
+        }
+    }
 
     Ok(())
 }
@@ -201,6 +226,13 @@ pub unsafe fn create_render_pass2(
         subpasses.len()
     );
 
+    #[cfg(feature = "webx")]
+    let ipc_depth_indices2: Vec<u32> = subpasses.iter()
+        .filter_map(|sp| sp.depth_stencil_attachment_index)
+        .collect();
+    #[cfg(feature = "webx")]
+    let ipc_attachments2: Vec<vk::AttachmentDescription> = attachments.clone();
+
     let render_pass_data = VkRenderPassData {
         device,
         attachments,
@@ -210,6 +242,23 @@ pub unsafe fn create_render_pass2(
 
     let render_pass_handle = RENDER_PASS_ALLOCATOR.allocate(render_pass_data);
     *p_render_pass = Handle::from_raw(render_pass_handle);
+
+    #[cfg(feature = "webx")]
+    {
+        let mut payload = Vec::with_capacity(12 + ipc_attachments2.len() * 16);
+        payload.extend_from_slice(&render_pass_handle.to_le_bytes());
+        payload.extend_from_slice(&(ipc_attachments2.len() as u32).to_le_bytes());
+        for (i, att) in ipc_attachments2.iter().enumerate() {
+            let is_depth: u32 = if ipc_depth_indices2.contains(&(i as u32)) { 1 } else { 0 };
+            payload.extend_from_slice(&(att.format.as_raw() as u32).to_le_bytes());
+            payload.extend_from_slice(&(att.load_op.as_raw() as u32).to_le_bytes());
+            payload.extend_from_slice(&(att.store_op.as_raw() as u32).to_le_bytes());
+            payload.extend_from_slice(&is_depth.to_le_bytes());
+        }
+        if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0057, &payload) {
+            log::warn!("[webx] create_render_pass2 IPC failed: {:?}", e);
+        }
+    }
 
     Ok(())
 }

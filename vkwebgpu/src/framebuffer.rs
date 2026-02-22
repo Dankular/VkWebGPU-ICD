@@ -45,6 +45,9 @@ pub unsafe fn create_framebuffer(
         attachments.len()
     );
 
+    #[cfg(feature = "webx")]
+    let ipc_views: Vec<vk::ImageView> = attachments.clone();
+
     let framebuffer_data = VkFramebufferData {
         device,
         render_pass: create_info.render_pass,
@@ -56,6 +59,23 @@ pub unsafe fn create_framebuffer(
 
     let framebuffer_handle = FRAMEBUFFER_ALLOCATOR.allocate(framebuffer_data);
     *p_framebuffer = Handle::from_raw(framebuffer_handle);
+
+    #[cfg(feature = "webx")]
+    {
+        // payload: handle(u64) + rpHandle(u64) + width(u32) + height(u32) + viewCount(u32) + imageViews[](u64)
+        let mut payload = Vec::with_capacity(28 + ipc_views.len() * 8);
+        payload.extend_from_slice(&framebuffer_handle.to_le_bytes());
+        payload.extend_from_slice(&create_info.render_pass.as_raw().to_le_bytes());
+        payload.extend_from_slice(&create_info.width.to_le_bytes());
+        payload.extend_from_slice(&create_info.height.to_le_bytes());
+        payload.extend_from_slice(&(ipc_views.len() as u32).to_le_bytes());
+        for &view in &ipc_views {
+            payload.extend_from_slice(&view.as_raw().to_le_bytes());
+        }
+        if let Err(e) = crate::webx_ipc::WebXIpc::global().send_cmd(0x0059, &payload) {
+            log::warn!("[webx] create_framebuffer IPC failed: {:?}", e);
+        }
+    }
 
     Ok(())
 }
