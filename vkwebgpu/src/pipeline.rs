@@ -68,7 +68,7 @@ pub unsafe fn create_shader_module(
 
     #[cfg(feature = "webx")]
     {
-        match crate::shader::translate_spirv_to_wgsl(&spirv_snap) {
+        match crate::shader::ShaderCache::translate_spirv_to_wgsl(&spirv_snap) {
             Ok(wgsl) => {
                 let wgsl_bytes = wgsl.as_bytes();
                 // payload: handle(u64) + wgslLen(u32) + wgsl[...]
@@ -998,7 +998,7 @@ unsafe fn serialize_and_send_graphics_pipeline(
         payload.extend_from_slice(&0u32.to_le_bytes());
     }
 
-    crate::webx_ipc::WebXIpc::global().send_cmd(0x0054, &payload)
+    crate::webx_ipc::WebXIpc::global().send_cmd(0x0054, &payload).map(|_| ())
 }
 
 pub unsafe fn destroy_pipeline(

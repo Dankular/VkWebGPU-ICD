@@ -21,6 +21,7 @@
 //! Variants that have no dedicated outer-protocol equivalent use new opcodes defined here.
 
 use ash::vk;
+use ash::vk::Handle;
 
 use crate::command_buffer::{RecordedCommand, VkCommandBufferData};
 use crate::error::Result;
