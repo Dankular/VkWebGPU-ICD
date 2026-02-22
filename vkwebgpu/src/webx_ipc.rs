@@ -21,9 +21,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 const WEBX_MAGIC: u32 = 0x58574756; // "VGWX" in little-endian
 
-// SYS_iopl / SYS_ioperm syscall numbers for x86_64 Linux
+// SYS_iopl / SYS_ioperm syscall numbers — differ between x86_64 and i686
+#[cfg(target_arch = "x86_64")]
 const SYS_IOPL:   u64 = 172;
+#[cfg(target_arch = "x86_64")]
 const SYS_IOPERM: u64 = 173;
+#[cfg(target_arch = "x86")]
+const SYS_IOPL:   u32 = 110;
+#[cfg(target_arch = "x86")]
+const SYS_IOPERM: u32 = 101;
 
 // Sentinel returned by inl() when the CheerpX FIFO is empty
 const FIFO_EMPTY: u32 = 0xFFFF_FFFF;
@@ -62,16 +68,17 @@ impl WebXIpc {
 
     /// Grant the process I/O port access via ioperm(3), falling back to iopl(3).
     fn port_init(&self) {
-        let port = self.port as u64;
+        // ── x86_64: uses `syscall` instruction, 64-bit registers ────────────
+        #[cfg(target_arch = "x86_64")]
         unsafe {
-            // Try ioperm first — grants access to exactly 4 ports (one u32).
+            let port = self.port as u64;
             let ret: i64;
             core::arch::asm!(
                 "syscall",
                 in("rax")  SYS_IOPERM,
                 in("rdi")  port,
-                in("rsi")  4u64,   // number of ports
-                in("rdx")  1u64,   // turn_on = 1
+                in("rsi")  4u64,
+                in("rdx")  1u64,
                 lateout("rax") ret,
                 out("rcx") _,
                 out("r11") _,
@@ -83,15 +90,53 @@ impl WebXIpc {
             }
             log::warn!("[WebXIpc] ioperm failed ({}), trying iopl(3)", ret);
 
-            // Fallback: iopl(3) — grants full I/O port access for the process.
             let ret2: i64;
             core::arch::asm!(
                 "syscall",
                 in("rax")  SYS_IOPL,
-                in("rdi")  3u64,   // level 3 = full I/O access
+                in("rdi")  3u64,
                 lateout("rax") ret2,
                 out("rcx") _,
                 out("r11") _,
+                options(nostack),
+            );
+            if ret2 != 0 {
+                log::error!("[WebXIpc] iopl(3) also failed ({}). \
+                             I/O port access unavailable — IPC will not work.", ret2);
+            } else {
+                log::debug!("[WebXIpc] iopl(3) succeeded");
+            }
+        }
+
+        // ── i686: uses `int 0x80`, different syscall numbers, 32-bit regs ───
+        // ebx is PIC-reserved in some configs; use xchg ebx,{r} idiom instead.
+        #[cfg(target_arch = "x86")]
+        unsafe {
+            let port = self.port as u32;
+            let ret: i32;
+            core::arch::asm!(
+                "xchg ebx, {p}",
+                "int 0x80",
+                "xchg ebx, {p}",
+                p = inout(reg) port => _,
+                inout("eax") SYS_IOPERM => ret,
+                in("ecx") 4u32,
+                in("edx") 1u32,
+                options(nostack),
+            );
+            if ret == 0 {
+                log::debug!("[WebXIpc] ioperm(0x{:x}, 4, 1) succeeded", port);
+                return;
+            }
+            log::warn!("[WebXIpc] ioperm failed ({}), trying iopl(3)", ret);
+
+            let ret2: i32;
+            core::arch::asm!(
+                "xchg ebx, {lvl}",
+                "int 0x80",
+                "xchg ebx, {lvl}",
+                lvl = inout(reg) 3u32 => _,
+                inout("eax") SYS_IOPL => ret2,
                 options(nostack),
             );
             if ret2 != 0 {
