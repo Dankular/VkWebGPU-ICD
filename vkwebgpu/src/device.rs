@@ -285,6 +285,17 @@ pub unsafe fn enumerate_device_extension_properties(
         ("VK_EXT_sampler_filter_minmax", 2),
         ("VK_KHR_multiview", 1),
         ("VK_KHR_device_group", 3),
+        // vkd3d-proton / DX12 compatibility
+        ("VK_EXT_robustness2", 1),                  // null descriptor support (DX12 tier)
+        ("VK_KHR_16bit_storage", 1),                // 16-bit types in shaders
+        ("VK_KHR_8bit_storage", 1),                 // 8-bit types in shaders
+        ("VK_KHR_storage_buffer_storage_class", 1), // required by 16bit/8bit storage
+        ("VK_EXT_shader_viewport_index_layer", 1),  // SV_ViewportArrayIndex / SV_RenderTargetArrayIndex
+        ("VK_KHR_draw_indirect_count", 1),          // ExecuteIndirect
+        ("VK_EXT_mutable_descriptor_type", 1),      // vkd3d-proton descriptor heap model
+        ("VK_VALVE_mutable_descriptor_type", 1),    // alias used by older vkd3d-proton
+        ("VK_EXT_vertex_attribute_divisor", 1),     // D3D instance data step rate
+        ("VK_KHR_shader_float16_int8", 1),          // 16/8-bit arithmetic in SPIR-V
     ];
 
     if p_properties.is_null() {

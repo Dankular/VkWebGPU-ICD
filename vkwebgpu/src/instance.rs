@@ -1004,6 +1004,36 @@ pub unsafe fn get_physical_device_features2(
                 s.extended_dynamic_state2_logic_op = vk::FALSE;
                 s.extended_dynamic_state2_patch_control_points = vk::FALSE;
             }
+            // vkd3d-proton / DX12 extension features
+            vk::StructureType::PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT => {
+                let s = &mut *(p_next as *mut vk::PhysicalDeviceRobustness2FeaturesEXT);
+                s.robust_buffer_access2 = vk::FALSE;
+                s.robust_image_access2 = vk::FALSE;
+                s.null_descriptor = vk::TRUE; // needed for DX12 null descriptors
+            }
+            vk::StructureType::PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES => {
+                let s = &mut *(p_next as *mut vk::PhysicalDevice16BitStorageFeatures);
+                s.storage_buffer16_bit_access = vk::TRUE;
+                s.uniform_and_storage_buffer16_bit_access = vk::TRUE;
+                s.storage_push_constant16 = vk::FALSE;
+                s.storage_input_output16 = vk::FALSE;
+            }
+            vk::StructureType::PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES => {
+                let s = &mut *(p_next as *mut vk::PhysicalDeviceShaderFloat16Int8Features);
+                s.shader_float16 = vk::TRUE;
+                s.shader_int8 = vk::TRUE;
+            }
+            vk::StructureType::PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT => {
+                let s =
+                    &mut *(p_next as *mut vk::PhysicalDeviceMutableDescriptorTypeFeaturesEXT);
+                s.mutable_descriptor_type = vk::TRUE;
+            }
+            vk::StructureType::PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT => {
+                let s =
+                    &mut *(p_next as *mut vk::PhysicalDeviceVertexAttributeDivisorFeaturesEXT);
+                s.vertex_attribute_instance_rate_divisor = vk::TRUE;
+                s.vertex_attribute_instance_rate_zero_divisor = vk::TRUE;
+            }
             _ => {
                 debug!(
                     "GetPhysicalDeviceFeatures2: unhandled sType {:?}",
