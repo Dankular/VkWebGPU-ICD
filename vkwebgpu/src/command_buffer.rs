@@ -3252,6 +3252,13 @@ pub fn replay_commands(
                     let dh = (dy1 - dy0).abs() as u32;
                     if sw == 0 || sh == 0 || dw == 0 || dh == 0 { continue; }
 
+                    // A single VkImageBlit region can span multiple array layers
+                    // (layerCount > 1) — e.g. mip-generating a whole cubemap or
+                    // texture array in one call.
+                    let layer_count = region.src_subresource.layer_count
+                        .min(region.dst_subresource.layer_count)
+                        .max(1);
+
                     let is_simple = formats_match && sw == dw && sh == dh
                         && sx0 >= 0 && sy0 >= 0 && dx0 >= 0 && dy0 >= 0
                         && sx1 > sx0 && sy1 > sy0 && dx1 > dx0 && dy1 > dy0;
@@ -3275,7 +3282,7 @@ pub fn replay_commands(
                                 },
                                 aspect: wgpu::TextureAspect::All,
                             },
-                            wgpu::Extent3d { width: sw, height: sh, depth_or_array_layers: 1 },
+                            wgpu::Extent3d { width: sw, height: sh, depth_or_array_layers: layer_count },
                         );
                         continue;
                     }
@@ -3299,43 +3306,48 @@ pub fn replay_commands(
                     });
                     backend.queue.write_buffer(&ubuf, 0, &ub);
 
-                    let sv = src_wgpu.create_view(&wgpu::TextureViewDescriptor {
-                        label: Some("blit_src"), dimension: Some(wgpu::TextureViewDimension::D2),
-                        base_mip_level: region.src_subresource.mip_level, mip_level_count: Some(1),
-                        base_array_layer: region.src_subresource.base_array_layer, array_layer_count: Some(1),
-                        ..Default::default()
-                    });
-                    let dv = dst_wgpu.create_view(&wgpu::TextureViewDescriptor {
-                        label: Some("blit_dst"), dimension: Some(wgpu::TextureViewDimension::D2),
-                        base_mip_level: region.dst_subresource.mip_level, mip_level_count: Some(1),
-                        base_array_layer: region.dst_subresource.base_array_layer, array_layer_count: Some(1),
-                        ..Default::default()
-                    });
-                    let bg = backend.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("blit_bg"), layout: &blit_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&sv) },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-                            wgpu::BindGroupEntry { binding: 2, resource: ubuf.as_entire_binding() },
-                        ],
-                    });
                     let vx = dx0.min(dx1).max(0) as u32;
                     let vy = dy0.min(dy1).max(0) as u32;
-                    {
-                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("BlitImage"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &dv, resolve_target: None,
-                                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                            })],
-                            depth_stencil_attachment: None,
-                            timestamp_writes: None, occlusion_query_set: None,
+
+                    for layer_offset in 0..layer_count {
+                        let sv = src_wgpu.create_view(&wgpu::TextureViewDescriptor {
+                            label: Some("blit_src"), dimension: Some(wgpu::TextureViewDimension::D2),
+                            base_mip_level: region.src_subresource.mip_level, mip_level_count: Some(1),
+                            base_array_layer: region.src_subresource.base_array_layer + layer_offset,
+                            array_layer_count: Some(1),
+                            ..Default::default()
                         });
-                        pass.set_pipeline(&pipeline);
-                        pass.set_bind_group(0, &bg, &[]);
-                        pass.set_viewport(vx as f32, vy as f32, dw as f32, dh as f32, 0.0, 1.0);
-                        pass.set_scissor_rect(vx, vy, dw, dh);
-                        pass.draw(0..3, 0..1);
+                        let dv = dst_wgpu.create_view(&wgpu::TextureViewDescriptor {
+                            label: Some("blit_dst"), dimension: Some(wgpu::TextureViewDimension::D2),
+                            base_mip_level: region.dst_subresource.mip_level, mip_level_count: Some(1),
+                            base_array_layer: region.dst_subresource.base_array_layer + layer_offset,
+                            array_layer_count: Some(1),
+                            ..Default::default()
+                        });
+                        let bg = backend.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("blit_bg"), layout: &blit_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&sv) },
+                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                                wgpu::BindGroupEntry { binding: 2, resource: ubuf.as_entire_binding() },
+                            ],
+                        });
+                        {
+                            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("BlitImage"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &dv, resolve_target: None,
+                                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None, occlusion_query_set: None,
+                            });
+                            pass.set_pipeline(&pipeline);
+                            pass.set_bind_group(0, &bg, &[]);
+                            pass.set_viewport(vx as f32, vy as f32, dw as f32, dh as f32, 0.0, 1.0);
+                            pass.set_scissor_rect(vx, vy, dw, dh);
+                            pass.draw(0..3, 0..1);
+                        }
                     }
                 }
             }
@@ -4004,6 +4016,13 @@ pub fn replay_commands(
                         continue;
                     }
 
+                    // A single VkImageBlit2 region can span multiple array layers
+                    // (layerCount > 1) — e.g. mip-generating a whole cubemap or
+                    // texture array in one call.
+                    let layer_count = region.src_subresource.layer_count
+                        .min(region.dst_subresource.layer_count)
+                        .max(1);
+
                     // Fast path: same format, same size, no flip, non-negative offsets
                     // → copy_texture_to_texture (no shader needed).
                     let is_simple_copy = formats_match
@@ -4049,7 +4068,7 @@ pub fn replay_commands(
                             wgpu::Extent3d {
                                 width: src_w,
                                 height: src_h,
-                                depth_or_array_layers: 1,
+                                depth_or_array_layers: layer_count,
                             },
                         );
                         continue;
@@ -4097,46 +4116,6 @@ pub fn replay_commands(
                     });
                     backend.queue.write_buffer(&uniform_buf, 0, &uniform_bytes);
 
-                    // Texture views for this mip/layer pair
-                    let src_view = src_wgpu.create_view(&wgpu::TextureViewDescriptor {
-                        label: Some("blit_src_view"),
-                        dimension: Some(wgpu::TextureViewDimension::D2),
-                        base_mip_level: region.src_subresource.mip_level,
-                        mip_level_count: Some(1),
-                        base_array_layer: region.src_subresource.base_array_layer,
-                        array_layer_count: Some(1),
-                        ..Default::default()
-                    });
-                    let dst_view = dst_wgpu.create_view(&wgpu::TextureViewDescriptor {
-                        label: Some("blit_dst_view"),
-                        dimension: Some(wgpu::TextureViewDimension::D2),
-                        base_mip_level: region.dst_subresource.mip_level,
-                        mip_level_count: Some(1),
-                        base_array_layer: region.dst_subresource.base_array_layer,
-                        array_layer_count: Some(1),
-                        ..Default::default()
-                    });
-
-                    let bind_group =
-                        backend.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("blit_image_bg"),
-                            layout: &blit_bgl,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(&src_view),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::Sampler(&sampler),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 2,
-                                    resource: uniform_buf.as_entire_binding(),
-                                },
-                            ],
-                        });
-
                     // Viewport and scissor cover the destination sub-region.
                     // For flipped dst (dst_x1 < dst_x0 or dst_y1 < dst_y0) we write
                     // to the same physical rect [min..max]; the flip is encoded in
@@ -4144,35 +4123,77 @@ pub fn replay_commands(
                     let vp_x = dst_x0.min(dst_x1).max(0) as u32;
                     let vp_y = dst_y0.min(dst_y1).max(0) as u32;
 
-                    {
-                        let mut pass =
-                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some("BlitImage2"),
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: &dst_view,
-                                    resolve_target: None,
-                                    ops: wgpu::Operations {
-                                        load: wgpu::LoadOp::Load,
-                                        store: wgpu::StoreOp::Store,
+                    for layer_offset in 0..layer_count {
+                        // Texture views for this mip/layer pair
+                        let src_view = src_wgpu.create_view(&wgpu::TextureViewDescriptor {
+                            label: Some("blit_src_view"),
+                            dimension: Some(wgpu::TextureViewDimension::D2),
+                            base_mip_level: region.src_subresource.mip_level,
+                            mip_level_count: Some(1),
+                            base_array_layer: region.src_subresource.base_array_layer + layer_offset,
+                            array_layer_count: Some(1),
+                            ..Default::default()
+                        });
+                        let dst_view = dst_wgpu.create_view(&wgpu::TextureViewDescriptor {
+                            label: Some("blit_dst_view"),
+                            dimension: Some(wgpu::TextureViewDimension::D2),
+                            base_mip_level: region.dst_subresource.mip_level,
+                            mip_level_count: Some(1),
+                            base_array_layer: region.dst_subresource.base_array_layer + layer_offset,
+                            array_layer_count: Some(1),
+                            ..Default::default()
+                        });
+
+                        let bind_group =
+                            backend.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("blit_image_bg"),
+                                layout: &blit_bgl,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: wgpu::BindingResource::TextureView(&src_view),
                                     },
-                                })],
-                                depth_stencil_attachment: None,
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: wgpu::BindingResource::Sampler(&sampler),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 2,
+                                        resource: uniform_buf.as_entire_binding(),
+                                    },
+                                ],
                             });
-                        pass.set_pipeline(&pipeline);
-                        pass.set_bind_group(0, &bind_group, &[]);
-                        pass.set_viewport(
-                            vp_x as f32,
-                            vp_y as f32,
-                            dst_w as f32,
-                            dst_h as f32,
-                            0.0,
-                            1.0,
-                        );
-                        pass.set_scissor_rect(vp_x, vp_y, dst_w, dst_h);
-                        pass.draw(0..3, 0..1);
-                    } // render pass dropped here, before per-region resources
+
+                        {
+                            let mut pass =
+                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("BlitImage2"),
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: &dst_view,
+                                        resolve_target: None,
+                                        ops: wgpu::Operations {
+                                            load: wgpu::LoadOp::Load,
+                                            store: wgpu::StoreOp::Store,
+                                        },
+                                    })],
+                                    depth_stencil_attachment: None,
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                });
+                            pass.set_pipeline(&pipeline);
+                            pass.set_bind_group(0, &bind_group, &[]);
+                            pass.set_viewport(
+                                vp_x as f32,
+                                vp_y as f32,
+                                dst_w as f32,
+                                dst_h as f32,
+                                0.0,
+                                1.0,
+                            );
+                            pass.set_scissor_rect(vp_x, vp_y, dst_w, dst_h);
+                            pass.draw(0..3, 0..1);
+                        } // render pass dropped here, before per-layer resources
+                    } // end for layer_offset
                 } // end for region
             }
 
