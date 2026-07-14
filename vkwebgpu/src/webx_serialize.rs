@@ -447,13 +447,6 @@ fn serialize_one(cmd: &RecordedCommand, out: &mut Vec<u8>) {
             frame(FC_UPDATE_BUFFER, &p);
         }
 
-        RecordedCommand::ExecuteCommands { command_buffers } => {
-            let mut p = Vec::new();
-            write_u32(&mut p, command_buffers.len() as u32);
-            for cb in command_buffers { write_u64(&mut p, cb.as_raw()); }
-            frame(FC_EXECUTE_COMMANDS, &p);
-        }
-
         RecordedCommand::BeginRendering { render_area, layer_count, color_attachments, depth_attachment, stencil_attachment } => {
             let mut p = Vec::new();
             p.extend_from_slice(unsafe { struct_bytes(render_area) }); // 16 bytes

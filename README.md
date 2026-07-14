@@ -226,9 +226,9 @@ DXVK exercises a specific Vulkan subset. Priority work items:
 | Descriptor indexing | ✅ | Required extension |
 | Dynamic rendering | ✅ | VK_KHR_dynamic_rendering |
 | Timeline semaphores | ✅ | VK_KHR_timeline_semaphore |
-| `vkCmdBlitImage` | 🔄 | Needed for mipmap gen |
+| `vkCmdBlitImage` | ✅ | Fast-path copy + render-pass blit |
+| Secondary command buffers | ✅ | Inlined into primary's command stream at record time |
 | Sparse resources | 🔄 | Stub; most games don't need |
-| Secondary command buffers | 🔄 | Stub; DXVK may require |
 | Pipeline cache | 🔄 | No-op; no correctness impact |
 
 ### Phase 3: WebX Integration

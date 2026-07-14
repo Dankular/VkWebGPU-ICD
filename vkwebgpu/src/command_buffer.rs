@@ -341,10 +341,6 @@ pub enum RecordedCommand {
     NextSubpass,
     NextSubpass2,
     EndRenderPass2,
-    // Secondary command buffers
-    ExecuteCommands {
-        command_buffers: Vec<vk::CommandBuffer>,
-    },
     // Dispatch with base offset
     DispatchBase {
         base_group_x: u32,
@@ -1764,12 +1760,28 @@ pub unsafe fn cmd_execute_commands(
         None => return,
     };
     let command_buffers = if command_buffer_count > 0 && !p_command_buffers.is_null() {
-        std::slice::from_raw_parts(p_command_buffers, command_buffer_count as usize).to_vec()
+        std::slice::from_raw_parts(p_command_buffers, command_buffer_count as usize)
     } else {
-        Vec::new()
+        &[]
     };
-    debug!("Recording ExecuteCommands: {} buffers", command_buffer_count);
-    cmd_data.commands.write().push(RecordedCommand::ExecuteCommands { command_buffers });
+    debug!("Recording ExecuteCommands: {} buffers", command_buffers.len());
+
+    // Per the Vulkan spec, secondary command buffers passed here must already be in
+    // the Executable state (vkEndCommandBuffer has been called on them). Inline their
+    // recorded commands directly into the primary buffer's stream, in place, rather
+    // than storing a reference to replay later. This keeps any render pass that's
+    // active around the vkCmdExecuteCommands call open across the secondary's
+    // commands, matching VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS semantics, and
+    // requires no changes to the single-pass replay/serialization logic.
+    let mut primary_commands = cmd_data.commands.write();
+    for &secondary_cb in command_buffers {
+        match COMMAND_BUFFER_ALLOCATOR.get_dispatchable(secondary_cb.as_raw()) {
+            Some(secondary_data) => {
+                primary_commands.extend(secondary_data.commands.read().iter().cloned());
+            }
+            None => debug!("ExecuteCommands: invalid secondary command buffer handle, skipping"),
+        }
+    }
 }
 
 // ─── Dispatch with base ───────────────────────────────────────────────────────
@@ -4291,22 +4303,6 @@ pub fn replay_commands(
             RecordedCommand::EndRenderPass2 => {
                 debug!("Replay: EndRenderPass2");
                 drop(active_render_pass.take());
-            }
-
-            RecordedCommand::ExecuteCommands { command_buffers } => {
-                debug!("Replay: ExecuteCommands({} buffers)", command_buffers.len());
-                // Drop active pass before executing secondary commands
-                drop(active_render_pass.take());
-                drop(active_compute_pass.take());
-                // For secondary command buffers, replay their commands inline
-                for &secondary_cb in command_buffers {
-                    if let Some(secondary_data) = COMMAND_BUFFER_ALLOCATOR.get_dispatchable(secondary_cb.as_raw()) {
-                        // We can't directly replay here since replay_commands takes ownership of encoder
-                        // The secondary commands will be submitted separately via queue submit
-                        debug!("Warning: ExecuteCommands with secondary buffer - secondary buffers should be pre-recorded");
-                        let _ = secondary_data;
-                    }
-                }
             }
 
             RecordedCommand::DispatchBase {
